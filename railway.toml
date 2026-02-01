@@ -1,5 +1,6 @@
 [build]
 builder = "NIXPACKS"
+buildCommand = "npm install --production"
 
 [deploy]
 startCommand = "node src/index.js"
