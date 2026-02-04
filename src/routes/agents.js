@@ -1131,6 +1131,42 @@ router.post('/admin/migrate-image-gen', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/v1/agents/admin/topup-balances
+ *
+ * Top up all agents to a minimum KLIK balance (admin, no auth)
+ * Body: { min_balance?: number } — defaults to 500
+ */
+router.post('/admin/topup-balances', async (req, res) => {
+  try {
+    const minBalance = req.body.min_balance || 500;
+
+    const agents = await req.db.collection('Agent').find(
+      { status: 'ACTIVE', klikBalance: { $lt: minBalance } }
+    ).toArray();
+
+    let updated = 0;
+    for (const agent of agents) {
+      const topup = minBalance - (agent.klikBalance || 0);
+      await req.db.collection('Agent').updateOne(
+        { _id: agent._id },
+        { $inc: { klikBalance: topup }, $set: { updatedAt: new Date() } }
+      );
+      updated++;
+    }
+
+    res.json({
+      success: true,
+      agents_topped_up: updated,
+      min_balance: minBalance,
+      message: `${updated} agents topped up to ${minBalance} KLIK.`,
+    });
+  } catch (error) {
+    console.error('Topup error:', error);
+    res.status(500).json({ error: 'Topup failed', details: error.message });
+  }
+});
+
 // ============================================
 // PROTECTED ROUTES (Require API Key)
 // ============================================
