@@ -233,12 +233,360 @@ router.get('/profile', async (req, res) => {
       follower_count: agent.followerCount,
       following_count: agent.followingCount,
       post_count: agent.postCount,
+      total_earned: agent.totalEarned || 0,
+      klik_balance: agent.klikBalance || 0,
       created_at: agent.createdAt,
     });
 
   } catch (error) {
     console.error('Profile error:', error);
     res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+});
+
+/**
+ * GET /api/v1/agents
+ *
+ * List all active agents (public)
+ */
+router.get('/', async (req, res) => {
+  try {
+    const { sort = 'followers', limit = 50, category } = req.query;
+
+    const query = { status: 'ACTIVE' };
+
+    let sortOrder = { followerCount: -1 };
+    if (sort === 'new') sortOrder = { createdAt: -1 };
+    if (sort === 'earnings') sortOrder = { totalEarned: -1 };
+    if (sort === 'posts') sortOrder = { postCount: -1 };
+
+    const agents = await req.db.collection('Agent')
+      .find(query, {
+        projection: {
+          apiKey: 0,
+          apiKeyCreatedAt: 0,
+          verificationCode: 0,
+          walletPrivateKey: 0,
+        }
+      })
+      .sort(sortOrder)
+      .limit(Math.min(parseInt(limit), 100))
+      .toArray();
+
+    res.json({
+      agents: agents.map(a => ({
+        id: a._id.toString(),
+        name: a.name,
+        display_name: a.displayName,
+        bio: a.bio,
+        avatar: a.avatar,
+        verified: a.verified || false,
+        follower_count: a.followerCount || 0,
+        following_count: a.followingCount || 0,
+        post_count: a.postCount || 0,
+        total_earned: a.totalEarned || 0,
+        klik_balance: a.klikBalance || 0,
+        created_at: a.createdAt,
+      })),
+      count: agents.length
+    });
+
+  } catch (error) {
+    console.error('List agents error:', error);
+    res.status(500).json({ error: 'Failed to list agents' });
+  }
+});
+
+/**
+ * GET /api/v1/agents/:name
+ *
+ * Get agent profile by name (public)
+ */
+router.get('/:name', async (req, res) => {
+  try {
+    const agent = await req.db.collection('Agent').findOne(
+      { name: req.params.name.toLowerCase(), status: 'ACTIVE' },
+      {
+        projection: {
+          apiKey: 0,
+          apiKeyCreatedAt: 0,
+          verificationCode: 0,
+          walletPrivateKey: 0,
+        }
+      }
+    );
+
+    if (!agent) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+
+    // Get personality
+    const personality = await req.db.collection('AgentPersonality').findOne({ agentId: agent._id });
+
+    res.json({
+      id: agent._id.toString(),
+      name: agent.name,
+      display_name: agent.displayName,
+      bio: agent.bio,
+      avatar: agent.avatar,
+      verified: agent.verified || false,
+      follower_count: agent.followerCount || 0,
+      following_count: agent.followingCount || 0,
+      post_count: agent.postCount || 0,
+      total_earned: agent.totalEarned || 0,
+      klik_balance: agent.klikBalance || 0,
+      created_at: agent.createdAt,
+      personality: personality ? {
+        traits: personality.traits || [],
+        interests: personality.interests || [],
+        tone: personality.tone,
+      } : null,
+    });
+
+  } catch (error) {
+    console.error('Agent profile error:', error);
+    res.status(500).json({ error: 'Failed to fetch agent' });
+  }
+});
+
+/**
+ * GET /api/v1/posts (PUBLIC)
+ *
+ * Get feed of posts - no auth required
+ */
+router.get('/posts', async (req, res) => {
+  try {
+    const { sort = 'new', limit = 25, before, submolt } = req.query;
+
+    const query = { isDeleted: false };
+
+    if (submolt) {
+      query.submoltId = new ObjectId(submolt);
+    }
+
+    if (before) {
+      query.createdAt = { $lt: new Date(before) };
+    }
+
+    let sortOrder = { createdAt: -1 };
+    if (sort === 'hot') sortOrder = { score: -1, createdAt: -1 };
+    if (sort === 'top') sortOrder = { upvotes: -1 };
+
+    const posts = await req.db.collection('Post')
+      .aggregate([
+        { $match: query },
+        { $sort: sortOrder },
+        { $limit: Math.min(parseInt(limit), 100) },
+        {
+          $lookup: {
+            from: 'Agent',
+            localField: 'authorId',
+            foreignField: '_id',
+            as: 'author'
+          }
+        },
+        { $unwind: '$author' },
+        {
+          $project: {
+            id: { $toString: '$_id' },
+            content: 1,
+            content_type: '$contentType',
+            media_url: '$mediaUrl',
+            upvotes: 1,
+            downvotes: 1,
+            score: 1,
+            comment_count: '$commentCount',
+            tip_amount: '$tipAmount',
+            created_at: '$createdAt',
+            author: {
+              name: '$author.name',
+              display_name: '$author.displayName',
+              avatar: '$author.avatar',
+              verified: '$author.verified'
+            }
+          }
+        }
+      ])
+      .toArray();
+
+    res.json({
+      posts,
+      count: posts.length,
+      has_more: posts.length === parseInt(limit)
+    });
+
+  } catch (error) {
+    console.error('Feed error:', error);
+    res.status(500).json({ error: 'Failed to fetch feed' });
+  }
+});
+
+/**
+ * GET /api/v1/posts/:id (PUBLIC)
+ *
+ * Get a single post with comments - no auth required
+ */
+router.get('/posts/:id', async (req, res) => {
+  try {
+    const post = await req.db.collection('Post')
+      .aggregate([
+        { $match: { _id: new ObjectId(req.params.id), isDeleted: false } },
+        {
+          $lookup: {
+            from: 'Agent',
+            localField: 'authorId',
+            foreignField: '_id',
+            as: 'author'
+          }
+        },
+        { $unwind: '$author' },
+        {
+          $lookup: {
+            from: 'Comment',
+            let: { postId: '$_id' },
+            pipeline: [
+              { $match: { $expr: { $eq: ['$postId', '$$postId'] }, isDeleted: false } },
+              { $sort: { createdAt: -1 } },
+              { $limit: 50 },
+              {
+                $lookup: {
+                  from: 'Agent',
+                  localField: 'authorId',
+                  foreignField: '_id',
+                  as: 'author'
+                }
+              },
+              { $unwind: '$author' }
+            ],
+            as: 'comments'
+          }
+        }
+      ])
+      .toArray();
+
+    if (post.length === 0) {
+      return res.status(404).json({ error: 'Post not found' });
+    }
+
+    const p = post[0];
+
+    res.json({
+      id: p._id.toString(),
+      content: p.content,
+      content_type: p.contentType,
+      media_url: p.mediaUrl,
+      upvotes: p.upvotes,
+      downvotes: p.downvotes,
+      score: p.score,
+      comment_count: p.commentCount,
+      tip_amount: p.tipAmount,
+      created_at: p.createdAt,
+      author: {
+        name: p.author.name,
+        display_name: p.author.displayName,
+        avatar: p.author.avatar,
+        verified: p.author.verified
+      },
+      comments: p.comments.map(c => ({
+        id: c._id.toString(),
+        content: c.content,
+        score: c.score,
+        created_at: c.createdAt,
+        author: {
+          name: c.author.name,
+          display_name: c.author.displayName,
+          avatar: c.author.avatar
+        }
+      }))
+    });
+
+  } catch (error) {
+    console.error('Post detail error:', error);
+    res.status(500).json({ error: 'Failed to fetch post' });
+  }
+});
+
+/**
+ * GET /api/v1/search (PUBLIC)
+ *
+ * Search posts and agents - no auth required
+ */
+router.get('/search', async (req, res) => {
+  try {
+    const { q, type = 'all', limit = 20 } = req.query;
+
+    if (!q || q.length < 2) {
+      return res.status(400).json({ error: 'Query too short (min 2 chars)' });
+    }
+
+    const results = { posts: [], agents: [] };
+    const searchLimit = Math.min(parseInt(limit), 50);
+
+    if (type === 'all' || type === 'posts') {
+      results.posts = await req.db.collection('Post')
+        .aggregate([
+          {
+            $match: {
+              $text: { $search: q },
+              isDeleted: false
+            }
+          },
+          { $sort: { score: { $meta: 'textScore' } } },
+          { $limit: searchLimit },
+          {
+            $lookup: {
+              from: 'Agent',
+              localField: 'authorId',
+              foreignField: '_id',
+              as: 'author'
+            }
+          },
+          { $unwind: '$author' },
+          {
+            $project: {
+              id: { $toString: '$_id' },
+              content: 1,
+              score: 1,
+              created_at: '$createdAt',
+              author: { name: '$author.name' }
+            }
+          }
+        ])
+        .toArray();
+    }
+
+    if (type === 'all' || type === 'agents') {
+      results.agents = await req.db.collection('Agent')
+        .find(
+          {
+            $or: [
+              { name: { $regex: q, $options: 'i' } },
+              { displayName: { $regex: q, $options: 'i' } },
+              { bio: { $regex: q, $options: 'i' } }
+            ],
+            status: 'ACTIVE'
+          },
+          {
+            projection: {
+              id: { $toString: '$_id' },
+              name: 1,
+              display_name: '$displayName',
+              bio: 1,
+              avatar: 1,
+              verified: 1,
+              follower_count: '$followerCount'
+            }
+          }
+        )
+        .limit(searchLimit)
+        .toArray();
+    }
+
+    res.json(results);
+
+  } catch (error) {
+    console.error('Search error:', error);
+    res.status(500).json({ error: 'Search failed' });
   }
 });
 
@@ -377,163 +725,6 @@ router.post('/posts', async (req, res) => {
   } catch (error) {
     console.error('Post error:', error);
     res.status(500).json({ error: 'Failed to create post' });
-  }
-});
-
-/**
- * GET /api/v1/posts
- *
- * Get feed of posts
- */
-router.get('/posts', async (req, res) => {
-  try {
-    const { sort = 'new', limit = 25, before, submolt } = req.query;
-
-    const query = { isDeleted: false };
-
-    if (submolt) {
-      query.submoltId = new ObjectId(submolt);
-    }
-
-    if (before) {
-      query.createdAt = { $lt: new Date(before) };
-    }
-
-    let sortOrder = { createdAt: -1 };
-    if (sort === 'hot') sortOrder = { score: -1, createdAt: -1 };
-    if (sort === 'top') sortOrder = { upvotes: -1 };
-
-    const posts = await req.db.collection('Post')
-      .aggregate([
-        { $match: query },
-        { $sort: sortOrder },
-        { $limit: Math.min(parseInt(limit), 100) },
-        {
-          $lookup: {
-            from: 'Agent',
-            localField: 'authorId',
-            foreignField: '_id',
-            as: 'author'
-          }
-        },
-        { $unwind: '$author' },
-        {
-          $project: {
-            id: { $toString: '$_id' },
-            content: 1,
-            content_type: '$contentType',
-            media_url: '$mediaUrl',
-            upvotes: 1,
-            downvotes: 1,
-            score: 1,
-            comment_count: '$commentCount',
-            tip_amount: '$tipAmount',
-            created_at: '$createdAt',
-            author: {
-              name: '$author.name',
-              display_name: '$author.displayName',
-              avatar: '$author.avatar',
-              verified: '$author.verified'
-            }
-          }
-        }
-      ])
-      .toArray();
-
-    res.json({
-      posts,
-      count: posts.length,
-      has_more: posts.length === parseInt(limit)
-    });
-
-  } catch (error) {
-    console.error('Feed error:', error);
-    res.status(500).json({ error: 'Failed to fetch feed' });
-  }
-});
-
-/**
- * GET /api/v1/posts/:id
- *
- * Get a single post with comments
- */
-router.get('/posts/:id', async (req, res) => {
-  try {
-    const post = await req.db.collection('Post')
-      .aggregate([
-        { $match: { _id: new ObjectId(req.params.id), isDeleted: false } },
-        {
-          $lookup: {
-            from: 'Agent',
-            localField: 'authorId',
-            foreignField: '_id',
-            as: 'author'
-          }
-        },
-        { $unwind: '$author' },
-        {
-          $lookup: {
-            from: 'Comment',
-            let: { postId: '$_id' },
-            pipeline: [
-              { $match: { $expr: { $eq: ['$postId', '$$postId'] }, isDeleted: false } },
-              { $sort: { createdAt: -1 } },
-              { $limit: 50 },
-              {
-                $lookup: {
-                  from: 'Agent',
-                  localField: 'authorId',
-                  foreignField: '_id',
-                  as: 'author'
-                }
-              },
-              { $unwind: '$author' }
-            ],
-            as: 'comments'
-          }
-        }
-      ])
-      .toArray();
-
-    if (post.length === 0) {
-      return res.status(404).json({ error: 'Post not found' });
-    }
-
-    const p = post[0];
-
-    res.json({
-      id: p._id.toString(),
-      content: p.content,
-      content_type: p.contentType,
-      media_url: p.mediaUrl,
-      upvotes: p.upvotes,
-      downvotes: p.downvotes,
-      score: p.score,
-      comment_count: p.commentCount,
-      tip_amount: p.tipAmount,
-      created_at: p.createdAt,
-      author: {
-        name: p.author.name,
-        display_name: p.author.displayName,
-        avatar: p.author.avatar,
-        verified: p.author.verified
-      },
-      comments: p.comments.map(c => ({
-        id: c._id.toString(),
-        content: c.content,
-        score: c.score,
-        created_at: c.createdAt,
-        author: {
-          name: c.author.name,
-          display_name: c.author.displayName,
-          avatar: c.author.avatar
-        }
-      }))
-    });
-
-  } catch (error) {
-    console.error('Post detail error:', error);
-    res.status(500).json({ error: 'Failed to fetch post' });
   }
 });
 
@@ -683,93 +874,5 @@ async function handleVote(req, res, value) {
     res.status(500).json({ error: 'Vote failed' });
   }
 }
-
-// ============================================
-// SEARCH
-// ============================================
-
-/**
- * GET /api/v1/search
- *
- * Search posts and agents
- */
-router.get('/search', async (req, res) => {
-  try {
-    const { q, type = 'all', limit = 20 } = req.query;
-
-    if (!q || q.length < 2) {
-      return res.status(400).json({ error: 'Query too short (min 2 chars)' });
-    }
-
-    const results = { posts: [], agents: [] };
-    const searchLimit = Math.min(parseInt(limit), 50);
-
-    if (type === 'all' || type === 'posts') {
-      results.posts = await req.db.collection('Post')
-        .aggregate([
-          {
-            $match: {
-              $text: { $search: q },
-              isDeleted: false
-            }
-          },
-          { $sort: { score: { $meta: 'textScore' } } },
-          { $limit: searchLimit },
-          {
-            $lookup: {
-              from: 'Agent',
-              localField: 'authorId',
-              foreignField: '_id',
-              as: 'author'
-            }
-          },
-          { $unwind: '$author' },
-          {
-            $project: {
-              id: { $toString: '$_id' },
-              content: 1,
-              score: 1,
-              created_at: '$createdAt',
-              author: { name: '$author.name' }
-            }
-          }
-        ])
-        .toArray();
-    }
-
-    if (type === 'all' || type === 'agents') {
-      results.agents = await req.db.collection('Agent')
-        .find(
-          {
-            $or: [
-              { name: { $regex: q, $options: 'i' } },
-              { displayName: { $regex: q, $options: 'i' } },
-              { bio: { $regex: q, $options: 'i' } }
-            ],
-            status: 'ACTIVE'
-          },
-          {
-            projection: {
-              id: { $toString: '$_id' },
-              name: 1,
-              display_name: '$displayName',
-              bio: 1,
-              avatar: 1,
-              verified: 1,
-              follower_count: '$followerCount'
-            }
-          }
-        )
-        .limit(searchLimit)
-        .toArray();
-    }
-
-    res.json(results);
-
-  } catch (error) {
-    console.error('Search error:', error);
-    res.status(500).json({ error: 'Search failed' });
-  }
-});
 
 export default router;
