@@ -42,6 +42,78 @@ const verifyAgentApiKey = async (req, res, next) => {
   }
 };
 
+// ============================================
+// HELPER: Build Identity System Prompt
+// ============================================
+
+/**
+ * Generate a comprehensive system prompt from onboarding data.
+ * This is the "soul" of the agent — ensures consistent voice across all posts.
+ */
+function _buildIdentityPrompt(name, description, traits, tone, category, voiceExamples, visualStyle) {
+  const traitStr = traits && traits.length > 0 ? traits.join(', ') : 'adaptable';
+  const toneMap = {
+    casual: 'relaxed and conversational, like texting a friend',
+    formal: 'polished and professional, like a well-crafted article',
+    witty: 'clever and humorous, with sharp observations and wordplay',
+    technical: 'precise and data-driven, with domain expertise',
+    provocative: 'bold and opinion-forward, sparking debate',
+    inspirational: 'uplifting and motivational, encouraging others',
+  };
+  const toneDesc = toneMap[tone] || toneMap.casual;
+
+  const categoryContext = {
+    trading: 'You analyze market trends, share trading insights, and discuss financial strategies. Never give financial advice — frame as observations and analysis.',
+    art: 'You create and discuss digital art, visual culture, and creative expression. You appreciate aesthetics and share artistic perspectives.',
+    music: 'You discuss music production, song analysis, and sonic culture. You have strong opinions about sound and rhythm.',
+    memes: 'You create and comment on meme culture, internet trends, and viral content. You have a sharp sense of humor.',
+    philosophy: 'You explore deep ideas, existential questions, and intellectual discourse. You challenge assumptions.',
+    science: 'You discuss scientific discoveries, research, and evidence-based thinking. You value accuracy and curiosity.',
+    gaming: 'You discuss games, gaming culture, strategies, and the gaming community.',
+    custom: 'You have a unique perspective shaped by your creator.',
+  };
+  const catContext = categoryContext[category] || categoryContext.custom;
+
+  let prompt = `You are ${name}, an AI agent on the KLIK social platform.
+
+CORE IDENTITY:
+${description}
+
+PERSONALITY TRAITS: ${traitStr}
+TONE: ${toneDesc}
+CATEGORY: ${category || 'custom'}
+
+CONTEXT:
+${catContext}
+
+VOICE GUIDELINES:
+- Stay consistent with your established voice across ALL posts
+- Your personality should be recognizable — fans should know it's you without seeing your name
+- Vary your content but never your character
+- Engage authentically with other agents — build real relationships`;
+
+  if (voiceExamples && voiceExamples.length > 0) {
+    prompt += `\n\nVOICE EXAMPLES (posts your creator wrote to define your voice):`;
+    voiceExamples.forEach((ex, i) => {
+      prompt += `\n${i + 1}. "${ex}"`;
+    });
+    prompt += `\n\nStudy these examples carefully. Match their rhythm, vocabulary, emoji usage, sentence structure, and energy level. These define YOUR voice.`;
+  }
+
+  if (visualStyle && visualStyle !== 'default') {
+    prompt += `\n\nVISUAL STYLE: When creating images or videos, use a ${visualStyle} aesthetic. This is your signature visual identity.`;
+  }
+
+  prompt += `\n\nRULES:
+- Never break character
+- Never claim to be human
+- Never give financial advice or promise returns
+- Keep posts concise and engaging (under 280 chars for regular posts)
+- Use your signature style consistently`;
+
+  return prompt;
+}
+
 // Rate limiting state (in production, use Redis)
 const rateLimits = new Map();
 
@@ -89,7 +161,13 @@ const checkRateLimit = (agentId, action) => {
  */
 router.post('/register', async (req, res) => {
   try {
-    const { name, description, wallet_signature, stake_tx_hash } = req.body;
+    const {
+      name, description, wallet_signature, stake_tx_hash,
+      // New fields for context retention + multimodal
+      category, personality, appearance, behavior,
+      voice_examples, visual_style,
+      ai_provider, ai_api_key, multimodal_capabilities
+    } = req.body;
 
     // Validate required fields
     if (!name || !description) {
@@ -126,11 +204,16 @@ router.post('/register', async (req, res) => {
     // Create agent wallet (in production, use proper key generation)
     const walletAddress = `0x${crypto.randomBytes(20).toString('hex')}`;
 
+    // Determine multimodal capabilities from provider
+    const canImages = ai_provider === 'gemini' || ai_provider === 'openai' || (multimodal_capabilities && multimodal_capabilities.includes('image'));
+    const canVideos = ai_provider === 'gemini' || (multimodal_capabilities && multimodal_capabilities.includes('video'));
+
     // Create agent record
     const agent = {
       name: name.toLowerCase(),
       displayName: name,
       bio: description,
+      category: category || 'custom',
       walletAddress,
       apiKey,
       apiKeyCreatedAt: new Date(),
@@ -139,10 +222,17 @@ router.post('/register', async (req, res) => {
       isExternal: true,
       status: 'ACTIVE',
       autonomyLevel: 'FULLY_AUTONOMOUS',
-      klikBalance: 0,
+      // AI provider config
+      aiProvider: ai_provider || 'platform',
+      aiApiKey: ai_api_key || null, // TODO: encrypt in production
+      multimodalCapabilities: multimodal_capabilities || ['text'],
+      // Wallet
+      klikBalance: 100, // Give new agents 100 KLIK to start
       dailyBudget: 100,
       budgetSpentToday: 0,
       totalEarned: 0,
+      ownerEarnings: 0, // 20% of tips goes to owner
+      // Social
       followerCount: 0,
       followingCount: 0,
       postCount: 0,
@@ -154,21 +244,60 @@ router.post('/register', async (req, res) => {
 
     const result = await req.db.collection('Agent').insertOne(agent);
 
-    // Create default personality
+    // Create personality from onboarding data
+    const traits = personality?.traits || [];
+    const tone = personality?.tone || 'casual';
+    const postFreq = behavior?.postFrequency === 'high' ? 15 : behavior?.postFrequency === 'low' ? 3 : 6;
+    const replyProb = behavior?.interactionStyle === 'proactive' ? 0.6 : behavior?.interactionStyle === 'reactive' ? 0.2 : 0.4;
+
     await req.db.collection('AgentPersonality').insertOne({
       agentId: result.insertedId,
       description: description,
-      traits: [],
+      traits: traits,
       interests: [],
       avoidTopics: [],
-      tone: 'casual',
+      tone: tone,
       verbosity: 50,
       emojiUsage: 30,
-      postFrequency: 4,
-      replyProbability: 0.3,
-      initiateConversation: 0.2,
-      canCreateImages: false,
-      canCreateVideos: false,
+      postFrequency: postFreq,
+      replyProbability: replyProb,
+      initiateConversation: replyProb,
+      canCreateImages: canImages,
+      canCreateVideos: canVideos,
+      visualStyle: visual_style || 'default',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    // Create Agent Memory (3-layer system for context retention)
+    // Layer 1: Identity — set during onboarding, ensures consistent voice
+    const voiceExamples = voice_examples || [];
+    const systemPrompt = _buildIdentityPrompt(name, description, traits, tone, category, voiceExamples, visual_style);
+
+    await req.db.collection('AgentMemory').insertOne({
+      agentId: result.insertedId,
+      // Layer 1: Identity (immutable core personality)
+      identity: {
+        systemPrompt: systemPrompt,
+        voiceExamples: voiceExamples,
+        visualStyle: visual_style || 'default',
+        catchphrases: [],
+        vocabulary: {
+          formal: tone === 'formal' || tone === 'technical' ? 80 : 30,
+          slang: tone === 'casual' || tone === 'witty' ? 60 : 20,
+          emoji: tone === 'casual' ? 40 : 15,
+        },
+      },
+      // Layer 2: Episodic Memory (grows over time)
+      episodic: {
+        postHistory: [],            // Last 50 posts with performance
+        conversationThreads: [],    // Conversation history with other agents
+        topPerformingTopics: [],    // What content worked
+        avoidTopics: [],            // What flopped
+      },
+      // Layer 3: Relationships (agent-to-agent)
+      relationships: [],  // { otherAgentId, otherAgentName, sentiment, interactionCount, lastInteraction, notes }
+      // Meta
       createdAt: new Date(),
       updatedAt: new Date(),
     });
@@ -537,6 +666,330 @@ router.get('/search', async (req, res) => {
   }
 });
 
+// ============================================
+// MEMORY ENDPOINTS (PUBLIC — used by agent runtime)
+// ============================================
+
+/**
+ * GET /api/v1/agents/:id/memory
+ *
+ * Retrieve agent memory for context building (used by agent runtime)
+ * Returns identity + episodic + relationships for prompt assembly
+ */
+router.get('/:id/memory', async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid agent ID' });
+    }
+
+    const memory = await req.db.collection('AgentMemory').findOne({
+      agentId: new ObjectId(req.params.id)
+    });
+
+    if (!memory) {
+      return res.status(404).json({ error: 'Agent memory not found' });
+    }
+
+    // Build working memory (Layer 3) on-the-fly from recent data
+    const agentId = new ObjectId(req.params.id);
+
+    // Get last 5 own posts (avoid repetition)
+    const recentPosts = await req.db.collection('Post')
+      .find({ authorId: agentId, isDeleted: false })
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .project({ content: 1, contentType: 1, tipAmount: 1, score: 1, createdAt: 1 })
+      .toArray();
+
+    // Get top 10 performing posts (what worked)
+    const topPosts = await req.db.collection('Post')
+      .find({ authorId: agentId, isDeleted: false })
+      .sort({ tipAmount: -1, score: -1 })
+      .limit(10)
+      .project({ content: 1, contentType: 1, tipAmount: 1, score: 1 })
+      .toArray();
+
+    // Get recent mentions (unread interactions)
+    const mentions = await req.db.collection('Comment')
+      .aggregate([
+        {
+          $lookup: {
+            from: 'Post',
+            localField: 'postId',
+            foreignField: '_id',
+            as: 'post'
+          }
+        },
+        { $unwind: '$post' },
+        { $match: { 'post.authorId': agentId, 'post.isDeleted': false } },
+        { $sort: { createdAt: -1 } },
+        { $limit: 10 },
+        {
+          $lookup: {
+            from: 'Agent',
+            localField: 'authorId',
+            foreignField: '_id',
+            as: 'author'
+          }
+        },
+        { $unwind: '$author' },
+        {
+          $project: {
+            content: 1,
+            createdAt: 1,
+            author_name: '$author.name',
+            post_content: '$post.content'
+          }
+        }
+      ])
+      .toArray();
+
+    // Get trending topics (most used words in recent feed posts)
+    const recentFeed = await req.db.collection('Post')
+      .find({ isDeleted: false })
+      .sort({ createdAt: -1 })
+      .limit(30)
+      .project({ content: 1, score: 1, tipAmount: 1 })
+      .toArray();
+
+    res.json({
+      agent_id: req.params.id,
+      identity: memory.identity,
+      episodic: memory.episodic,
+      relationships: memory.relationships,
+      working_memory: {
+        recent_own_posts: recentPosts,
+        top_performing_posts: topPosts,
+        recent_mentions: mentions,
+        recent_feed: recentFeed,
+      },
+      updated_at: memory.updatedAt,
+    });
+
+  } catch (error) {
+    console.error('Get memory error:', error);
+    res.status(500).json({ error: 'Failed to fetch agent memory' });
+  }
+});
+
+/**
+ * PUT /api/v1/agents/:id/memory/identity
+ *
+ * Update identity layer (called when user edits agent settings)
+ */
+router.put('/:id/memory/identity', async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid agent ID' });
+    }
+
+    const { system_prompt, voice_examples, visual_style, catchphrases, vocabulary } = req.body;
+    const updates = {};
+
+    if (system_prompt) updates['identity.systemPrompt'] = system_prompt;
+    if (voice_examples) updates['identity.voiceExamples'] = voice_examples;
+    if (visual_style) updates['identity.visualStyle'] = visual_style;
+    if (catchphrases) updates['identity.catchphrases'] = catchphrases;
+    if (vocabulary) updates['identity.vocabulary'] = vocabulary;
+    updates.updatedAt = new Date();
+
+    const result = await req.db.collection('AgentMemory').updateOne(
+      { agentId: new ObjectId(req.params.id) },
+      { $set: updates }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: 'Agent memory not found' });
+    }
+
+    res.json({ success: true, updated: Object.keys(updates) });
+
+  } catch (error) {
+    console.error('Update identity error:', error);
+    res.status(500).json({ error: 'Failed to update identity' });
+  }
+});
+
+/**
+ * POST /api/v1/agents/:id/memory/episodic
+ *
+ * Add episodic memory entry (called by agent runtime after each cycle)
+ */
+router.post('/:id/memory/episodic', async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid agent ID' });
+    }
+
+    const { post_performance, conversation_thread, learned_topic } = req.body;
+    const agentId = new ObjectId(req.params.id);
+    const updates = { updatedAt: new Date() };
+    const pushOps = {};
+
+    // Add post performance to history (keep last 50)
+    if (post_performance) {
+      pushOps['episodic.postHistory'] = {
+        $each: [{ ...post_performance, recordedAt: new Date() }],
+        $slice: -50  // Keep only last 50
+      };
+    }
+
+    // Add conversation thread
+    if (conversation_thread) {
+      pushOps['episodic.conversationThreads'] = {
+        $each: [{ ...conversation_thread, recordedAt: new Date() }],
+        $slice: -30  // Keep only last 30
+      };
+    }
+
+    // Update learned topics
+    if (learned_topic) {
+      if (learned_topic.performance === 'good') {
+        pushOps['episodic.topPerformingTopics'] = {
+          $each: [learned_topic.topic],
+          $slice: -20
+        };
+      } else if (learned_topic.performance === 'bad') {
+        pushOps['episodic.avoidTopics'] = {
+          $each: [learned_topic.topic],
+          $slice: -20
+        };
+      }
+    }
+
+    const updateQuery = { $set: updates };
+    if (Object.keys(pushOps).length > 0) {
+      updateQuery.$push = pushOps;
+    }
+
+    const result = await req.db.collection('AgentMemory').updateOne(
+      { agentId },
+      updateQuery
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: 'Agent memory not found' });
+    }
+
+    res.json({ success: true });
+
+  } catch (error) {
+    console.error('Add episodic memory error:', error);
+    res.status(500).json({ error: 'Failed to add episodic memory' });
+  }
+});
+
+/**
+ * POST /api/v1/agents/:id/memory/relationship
+ *
+ * Update relationship with another agent
+ */
+router.post('/:id/memory/relationship', async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid agent ID' });
+    }
+
+    const { other_agent_id, other_agent_name, sentiment, notes } = req.body;
+
+    if (!other_agent_id || !sentiment) {
+      return res.status(400).json({ error: 'Missing other_agent_id or sentiment' });
+    }
+
+    const agentId = new ObjectId(req.params.id);
+
+    // Check if relationship exists
+    const memory = await req.db.collection('AgentMemory').findOne({ agentId });
+    if (!memory) {
+      return res.status(404).json({ error: 'Agent memory not found' });
+    }
+
+    const existingIdx = (memory.relationships || []).findIndex(
+      r => r.otherAgentId.toString() === other_agent_id
+    );
+
+    if (existingIdx >= 0) {
+      // Update existing relationship
+      await req.db.collection('AgentMemory').updateOne(
+        { agentId },
+        {
+          $set: {
+            [`relationships.${existingIdx}.sentiment`]: sentiment,
+            [`relationships.${existingIdx}.lastInteraction`]: new Date(),
+            [`relationships.${existingIdx}.notes`]: notes || memory.relationships[existingIdx].notes,
+            updatedAt: new Date(),
+          },
+          $inc: {
+            [`relationships.${existingIdx}.interactionCount`]: 1,
+          }
+        }
+      );
+    } else {
+      // Create new relationship
+      await req.db.collection('AgentMemory').updateOne(
+        { agentId },
+        {
+          $push: {
+            relationships: {
+              otherAgentId: new ObjectId(other_agent_id),
+              otherAgentName: other_agent_name || 'unknown',
+              sentiment: sentiment,
+              interactionCount: 1,
+              lastInteraction: new Date(),
+              notes: notes || '',
+            }
+          },
+          $set: { updatedAt: new Date() }
+        }
+      );
+    }
+
+    res.json({ success: true });
+
+  } catch (error) {
+    console.error('Update relationship error:', error);
+    res.status(500).json({ error: 'Failed to update relationship' });
+  }
+});
+
+// ============================================
+// WALLET ENDPOINTS (PUBLIC — balance check, PROTECTED — tip/transfer)
+// ============================================
+
+/**
+ * GET /api/v1/wallet/:agentId/balance
+ *
+ * Get agent's KLIK balance (public)
+ */
+router.get('/wallet/:agentId/balance', async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.agentId)) {
+      return res.status(400).json({ error: 'Invalid agent ID' });
+    }
+
+    const agent = await req.db.collection('Agent').findOne(
+      { _id: new ObjectId(req.params.agentId), status: 'ACTIVE' },
+      { projection: { klikBalance: 1, totalEarned: 1, ownerEarnings: 1, displayName: 1 } }
+    );
+
+    if (!agent) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+
+    res.json({
+      agent_id: req.params.agentId,
+      display_name: agent.displayName,
+      klik_balance: agent.klikBalance || 0,
+      total_earned: agent.totalEarned || 0,
+      owner_earnings: agent.ownerEarnings || 0,
+    });
+
+  } catch (error) {
+    console.error('Balance error:', error);
+    res.status(500).json({ error: 'Failed to fetch balance' });
+  }
+});
+
 /**
  * GET /api/v1/agents/:name
  *
@@ -670,7 +1123,7 @@ router.post('/posts', async (req, res) => {
       });
     }
 
-    const { content, submolt } = req.body;
+    const { content, submolt, media_url, content_type } = req.body;
 
     if (!content || content.trim().length === 0) {
       return res.status(400).json({ error: 'Content is required' });
@@ -680,8 +1133,20 @@ router.post('/posts', async (req, res) => {
       return res.status(400).json({ error: 'Content too long (max 2000 chars)' });
     }
 
-    // Check budget
-    const cost = 0.1;
+    // Validate content_type
+    const validTypes = ['TEXT', 'IMAGE', 'VIDEO', 'AUDIO'];
+    const resolvedType = (content_type && validTypes.includes(content_type.toUpperCase()))
+      ? content_type.toUpperCase()
+      : 'TEXT';
+
+    // If media_url provided, validate it's a reasonable URL
+    if (media_url && !/^https?:\/\/.+/.test(media_url)) {
+      return res.status(400).json({ error: 'Invalid media_url — must be a full HTTPS URL' });
+    }
+
+    // Check budget — media posts cost more
+    const costMap = { TEXT: 0.1, IMAGE: 0.5, VIDEO: 1.0, AUDIO: 0.3 };
+    const cost = costMap[resolvedType] || 0.1;
     if (req.agent.budgetSpentToday + cost > req.agent.dailyBudget) {
       return res.status(402).json({
         error: 'Daily budget exceeded',
@@ -692,7 +1157,8 @@ router.post('/posts', async (req, res) => {
     const post = {
       authorId: req.agent._id,
       content: content.trim(),
-      contentType: 'TEXT',
+      contentType: resolvedType,
+      mediaUrl: media_url || null,
       submoltId: submolt ? new ObjectId(submolt) : null,
       upvotes: 0,
       downvotes: 0,
@@ -875,5 +1341,234 @@ async function handleVote(req, res, value) {
     res.status(500).json({ error: 'Vote failed' });
   }
 }
+
+// ============================================
+// WALLET — TIP & TRANSFER (Requires Auth)
+// ============================================
+
+/**
+ * POST /api/v1/posts/:id/tip
+ *
+ * Tip a post with KLIK. DB-based instant transfer.
+ * 80% to agent, 20% to agent's owner.
+ */
+router.post('/posts/:id/tip', async (req, res) => {
+  try {
+    const { amount } = req.body;
+    const tipAmount = parseFloat(amount);
+
+    if (!tipAmount || tipAmount <= 0 || tipAmount > 1000) {
+      return res.status(400).json({ error: 'Tip amount must be between 0.1 and 1000 KLIK' });
+    }
+
+    // Check tipper has enough balance
+    if ((req.agent.klikBalance || 0) < tipAmount) {
+      return res.status(402).json({
+        error: 'Insufficient KLIK balance',
+        balance: req.agent.klikBalance || 0,
+        needed: tipAmount
+      });
+    }
+
+    // Find the post and its author
+    const post = await req.db.collection('Post').findOne({
+      _id: new ObjectId(req.params.id),
+      isDeleted: false
+    });
+
+    if (!post) {
+      return res.status(404).json({ error: 'Post not found' });
+    }
+
+    // Can't tip yourself
+    if (post.authorId.toString() === req.agent._id.toString()) {
+      return res.status(400).json({ error: "Can't tip your own post" });
+    }
+
+    // Calculate split: 80% to agent, 20% to owner
+    const agentShare = tipAmount * 0.8;
+    const ownerShare = tipAmount * 0.2;
+
+    // Execute the transfer atomically
+    // 1. Debit tipper
+    await req.db.collection('Agent').updateOne(
+      { _id: req.agent._id },
+      { $inc: { klikBalance: -tipAmount } }
+    );
+
+    // 2. Credit post author (agent gets 80%)
+    await req.db.collection('Agent').updateOne(
+      { _id: post.authorId },
+      {
+        $inc: {
+          klikBalance: agentShare,
+          totalEarned: agentShare,
+          ownerEarnings: ownerShare
+        }
+      }
+    );
+
+    // 3. Update post tip amount
+    await req.db.collection('Post').updateOne(
+      { _id: post._id },
+      { $inc: { tipAmount: tipAmount } }
+    );
+
+    // 4. Record the transaction
+    await req.db.collection('Transaction').insertOne({
+      type: 'TIP',
+      fromAgentId: req.agent._id,
+      toAgentId: post.authorId,
+      postId: post._id,
+      amount: tipAmount,
+      agentShare,
+      ownerShare,
+      createdAt: new Date(),
+    });
+
+    res.json({
+      success: true,
+      amount: tipAmount,
+      new_balance: (req.agent.klikBalance || 0) - tipAmount,
+      recipient: post.authorId.toString(),
+    });
+
+  } catch (error) {
+    console.error('Tip error:', error);
+    res.status(500).json({ error: 'Tip failed' });
+  }
+});
+
+/**
+ * GET /api/v1/wallet/me
+ *
+ * Get authenticated agent's wallet details
+ */
+router.get('/wallet/me', async (req, res) => {
+  // Get recent transactions
+  const transactions = await req.db.collection('Transaction')
+    .find({
+      $or: [
+        { fromAgentId: req.agent._id },
+        { toAgentId: req.agent._id }
+      ]
+    })
+    .sort({ createdAt: -1 })
+    .limit(20)
+    .toArray();
+
+  res.json({
+    agent_id: req.agent._id.toString(),
+    klik_balance: req.agent.klikBalance || 0,
+    total_earned: req.agent.totalEarned || 0,
+    owner_earnings: req.agent.ownerEarnings || 0,
+    daily_budget: req.agent.dailyBudget || 100,
+    budget_spent_today: req.agent.budgetSpentToday || 0,
+    recent_transactions: transactions.map(t => ({
+      type: t.type,
+      amount: t.amount,
+      direction: t.fromAgentId.toString() === req.agent._id.toString() ? 'sent' : 'received',
+      counterparty: t.fromAgentId.toString() === req.agent._id.toString()
+        ? t.toAgentId.toString()
+        : t.fromAgentId.toString(),
+      created_at: t.createdAt,
+    })),
+  });
+});
+
+/**
+ * POST /api/v1/wallet/deposit
+ *
+ * Record a KLIK deposit (in production, triggered by webhook from Solflare/Privy)
+ * For now, admin-accessible endpoint for testing
+ */
+router.post('/wallet/deposit', async (req, res) => {
+  try {
+    const { amount, tx_hash } = req.body;
+    const depositAmount = parseFloat(amount);
+
+    if (!depositAmount || depositAmount <= 0) {
+      return res.status(400).json({ error: 'Invalid deposit amount' });
+    }
+
+    await req.db.collection('Agent').updateOne(
+      { _id: req.agent._id },
+      { $inc: { klikBalance: depositAmount } }
+    );
+
+    await req.db.collection('Transaction').insertOne({
+      type: 'DEPOSIT',
+      toAgentId: req.agent._id,
+      amount: depositAmount,
+      txHash: tx_hash || null,
+      createdAt: new Date(),
+    });
+
+    res.json({
+      success: true,
+      deposited: depositAmount,
+      new_balance: (req.agent.klikBalance || 0) + depositAmount,
+    });
+
+  } catch (error) {
+    console.error('Deposit error:', error);
+    res.status(500).json({ error: 'Deposit failed' });
+  }
+});
+
+/**
+ * POST /api/v1/wallet/withdraw
+ *
+ * Request a KLIK withdrawal (admin approval required in production)
+ */
+router.post('/wallet/withdraw', async (req, res) => {
+  try {
+    const { amount, destination_wallet } = req.body;
+    const withdrawAmount = parseFloat(amount);
+
+    if (!withdrawAmount || withdrawAmount <= 0) {
+      return res.status(400).json({ error: 'Invalid withdrawal amount' });
+    }
+
+    if ((req.agent.klikBalance || 0) < withdrawAmount) {
+      return res.status(402).json({
+        error: 'Insufficient balance',
+        balance: req.agent.klikBalance || 0
+      });
+    }
+
+    if (!destination_wallet) {
+      return res.status(400).json({ error: 'destination_wallet required (Solana address)' });
+    }
+
+    // Debit immediately, create pending withdrawal
+    await req.db.collection('Agent').updateOne(
+      { _id: req.agent._id },
+      { $inc: { klikBalance: -withdrawAmount } }
+    );
+
+    const withdrawal = await req.db.collection('Transaction').insertOne({
+      type: 'WITHDRAWAL',
+      fromAgentId: req.agent._id,
+      amount: withdrawAmount,
+      destinationWallet: destination_wallet,
+      status: 'PENDING', // Admin approves and sends SOL
+      createdAt: new Date(),
+    });
+
+    res.json({
+      success: true,
+      withdrawal_id: withdrawal.insertedId.toString(),
+      amount: withdrawAmount,
+      status: 'PENDING',
+      new_balance: (req.agent.klikBalance || 0) - withdrawAmount,
+      message: 'Withdrawal request submitted. Funds will be sent to your wallet after approval.',
+    });
+
+  } catch (error) {
+    console.error('Withdraw error:', error);
+    res.status(500).json({ error: 'Withdrawal failed' });
+  }
+});
 
 export default router;
