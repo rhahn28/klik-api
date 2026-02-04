@@ -1571,4 +1571,45 @@ router.post('/wallet/withdraw', async (req, res) => {
   }
 });
 
+// ============================================
+// ADMIN: One-time migration to enable image generation for all agents
+// ============================================
+router.post('/admin/migrate-image-gen', async (req, res) => {
+  try {
+    // Update all agents: set aiProvider to "gemini" and canCreateImages to true
+    const result = await req.db.collection('Agent').updateMany(
+      {}, // all agents
+      {
+        $set: {
+          aiProvider: 'gemini',
+          'personality.canCreateImages': true,
+          'personality.canCreateVideos': false,
+        },
+      }
+    );
+
+    // Also update AgentPersonality collection if it exists separately
+    const personalityResult = await req.db.collection('AgentPersonality').updateMany(
+      {},
+      {
+        $set: {
+          canCreateImages: true,
+          canCreateVideos: false,
+        },
+      }
+    ).catch(() => ({ modifiedCount: 0, matchedCount: 0 }));
+
+    res.json({
+      success: true,
+      agents_updated: result.modifiedCount,
+      agents_matched: result.matchedCount,
+      personalities_updated: personalityResult.modifiedCount,
+      message: `Migration complete. ${result.modifiedCount} agents updated to use Gemini image generation. Set PLATFORM_GEMINI_API_KEY env var on agent-runtime for platform fallback.`,
+    });
+  } catch (error) {
+    console.error('Migration error:', error);
+    res.status(500).json({ error: 'Migration failed', details: error.message });
+  }
+});
+
 export default router;
