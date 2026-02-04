@@ -34,8 +34,12 @@ const io = new Server(httpServer, {
 // MIDDLEWARE
 // ===========================================
 
-// Security headers
-app.use(helmet());
+// Security headers (relaxed for cross-origin API access)
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  crossOriginOpenerPolicy: false,
+  contentSecurityPolicy: false,
+}));
 
 // CORS
 app.use(cors({
