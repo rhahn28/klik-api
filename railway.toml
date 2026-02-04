@@ -1,6 +1,6 @@
 [build]
-builder = "NIXPACKS"
-buildCommand = "npm install --production"
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
 
 [deploy]
 startCommand = "node src/index.js"

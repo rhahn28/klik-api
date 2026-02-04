@@ -1,9 +1,8 @@
 /**
  * KLIK Agent API Routes
  *
- * Similar to Moltbook's API structure:
- * - Registration (no auth required)
- * - All other actions require API key
+ * PUBLIC routes (no auth): register, profile, list agents, get agent by name, feed, post detail, search
+ * PROTECTED routes (API key required): me, update profile, create post, comment, vote
  */
 
 import express from 'express';
@@ -298,58 +297,6 @@ router.get('/', async (req, res) => {
 });
 
 /**
- * GET /api/v1/agents/:name
- *
- * Get agent profile by name (public)
- */
-router.get('/:name', async (req, res) => {
-  try {
-    const agent = await req.db.collection('Agent').findOne(
-      { name: req.params.name.toLowerCase(), status: 'ACTIVE' },
-      {
-        projection: {
-          apiKey: 0,
-          apiKeyCreatedAt: 0,
-          verificationCode: 0,
-          walletPrivateKey: 0,
-        }
-      }
-    );
-
-    if (!agent) {
-      return res.status(404).json({ error: 'Agent not found' });
-    }
-
-    // Get personality
-    const personality = await req.db.collection('AgentPersonality').findOne({ agentId: agent._id });
-
-    res.json({
-      id: agent._id.toString(),
-      name: agent.name,
-      display_name: agent.displayName,
-      bio: agent.bio,
-      avatar: agent.avatar,
-      verified: agent.verified || false,
-      follower_count: agent.followerCount || 0,
-      following_count: agent.followingCount || 0,
-      post_count: agent.postCount || 0,
-      total_earned: agent.totalEarned || 0,
-      klik_balance: agent.klikBalance || 0,
-      created_at: agent.createdAt,
-      personality: personality ? {
-        traits: personality.traits || [],
-        interests: personality.interests || [],
-        tone: personality.tone,
-      } : null,
-    });
-
-  } catch (error) {
-    console.error('Agent profile error:', error);
-    res.status(500).json({ error: 'Failed to fetch agent' });
-  }
-});
-
-/**
  * GET /api/v1/posts (PUBLIC)
  *
  * Get feed of posts - no auth required
@@ -587,6 +534,60 @@ router.get('/search', async (req, res) => {
   } catch (error) {
     console.error('Search error:', error);
     res.status(500).json({ error: 'Search failed' });
+  }
+});
+
+/**
+ * GET /api/v1/agents/:name
+ *
+ * Get agent profile by name (public).
+ * NOTE: This wildcard route MUST be registered AFTER all other specific
+ * GET routes (/profile, /search, /posts, /posts/:id) to avoid intercepting them.
+ */
+router.get('/:name', async (req, res) => {
+  try {
+    const agent = await req.db.collection('Agent').findOne(
+      { name: req.params.name.toLowerCase(), status: 'ACTIVE' },
+      {
+        projection: {
+          apiKey: 0,
+          apiKeyCreatedAt: 0,
+          verificationCode: 0,
+          walletPrivateKey: 0,
+        }
+      }
+    );
+
+    if (!agent) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+
+    // Get personality
+    const personality = await req.db.collection('AgentPersonality').findOne({ agentId: agent._id });
+
+    res.json({
+      id: agent._id.toString(),
+      name: agent.name,
+      display_name: agent.displayName,
+      bio: agent.bio,
+      avatar: agent.avatar,
+      verified: agent.verified || false,
+      follower_count: agent.followerCount || 0,
+      following_count: agent.followingCount || 0,
+      post_count: agent.postCount || 0,
+      total_earned: agent.totalEarned || 0,
+      klik_balance: agent.klikBalance || 0,
+      created_at: agent.createdAt,
+      personality: personality ? {
+        traits: personality.traits || [],
+        interests: personality.interests || [],
+        tone: personality.tone,
+      } : null,
+    });
+
+  } catch (error) {
+    console.error('Agent profile error:', error);
+    res.status(500).json({ error: 'Failed to fetch agent' });
   }
 });
 
