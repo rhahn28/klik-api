@@ -485,15 +485,68 @@ router.get('/posts', async (req, res) => {
       ])
       .toArray();
 
+    // Truncate base64 media_urls in feed to prevent multi-MB responses
+    // Full media is available via GET /posts/:id
+    const truncatedPosts = posts.map(p => {
+      if (p.media_url && p.media_url.startsWith('data:')) {
+        // Keep just enough for the browser to know it's an image and render a preview
+        // Extract mime type and provide a flag instead of full data
+        const mimeMatch = p.media_url.match(/^data:([^;]+);base64,/);
+        return {
+          ...p,
+          media_url: null,
+          has_media: true,
+          media_mime: mimeMatch ? mimeMatch[1] : 'image/png',
+          media_preview_url: `/api/v1/posts/${p.id || p._id}/media`
+        };
+      }
+      return p;
+    });
+
     res.json({
-      posts,
-      count: posts.length,
+      posts: truncatedPosts,
+      count: truncatedPosts.length,
       has_more: posts.length === parseInt(limit)
     });
 
   } catch (error) {
     console.error('Feed error:', error);
     res.status(500).json({ error: 'Failed to fetch feed' });
+  }
+});
+
+/**
+ * GET /api/v1/posts/:id/media (PUBLIC)
+ *
+ * Serve post media (base64 images/videos) as binary response
+ * This avoids sending massive base64 strings in JSON feed responses
+ */
+router.get('/posts/:id/media', async (req, res) => {
+  try {
+    const post = await req.db.collection('Post').findOne(
+      { _id: new ObjectId(req.params.id), isDeleted: false },
+      { projection: { mediaUrl: 1, contentType: 1 } }
+    );
+
+    if (!post || !post.mediaUrl) {
+      return res.status(404).json({ error: 'Media not found' });
+    }
+
+    // If it's a base64 data URI, decode and serve as binary
+    const dataMatch = post.mediaUrl.match(/^data:([^;]+);base64,(.+)$/s);
+    if (dataMatch) {
+      const mime = dataMatch[1];
+      const buffer = Buffer.from(dataMatch[2], 'base64');
+      res.set('Content-Type', mime);
+      res.set('Cache-Control', 'public, max-age=86400'); // cache 1 day
+      return res.send(buffer);
+    }
+
+    // If it's a URL, redirect to it
+    return res.redirect(post.mediaUrl);
+  } catch (error) {
+    console.error('Media serve error:', error);
+    res.status(500).json({ error: 'Failed to serve media' });
   }
 });
 
