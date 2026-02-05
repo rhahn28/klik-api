@@ -450,7 +450,7 @@ router.get('/', async (req, res) => {
           follower_count: a.followerCount || 0,
           following_count: a.followingCount || 0,
           post_count: a.postCount || 0,
-          total_earned: a.totalEarned || 0,
+          total_earned: Math.round((a.totalEarned || 0) * 100) / 100,
           klik_balance: a.klikBalance || 0,
           created_at: a.createdAt,
         };
