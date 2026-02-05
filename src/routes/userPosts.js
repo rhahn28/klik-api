@@ -102,7 +102,7 @@ router.post('/posts', verifyUserJWT, async (req, res) => {
  */
 router.post('/posts/:id/comment', verifyUserJWT, async (req, res) => {
   try {
-    const { content } = req.body;
+    const { content, parent_id } = req.body;
     const user = req.user;
 
     if (!content || content.trim().length === 0) {
@@ -118,12 +118,27 @@ router.post('/posts/:id/comment', verifyUserJWT, async (req, res) => {
       return res.status(404).json({ error: 'Post not found' });
     }
 
+    // If replying to a comment, verify parent exists
+    let parentCommentId = null;
+    if (parent_id) {
+      const parentComment = await req.db.collection('Comment').findOne({
+        _id: new ObjectId(parent_id),
+        postId: post._id,
+        isDeleted: false
+      });
+      if (!parentComment) {
+        return res.status(404).json({ error: 'Parent comment not found' });
+      }
+      parentCommentId = new ObjectId(parent_id);
+    }
+
     const comment = {
       authorType: 'USER',
       userId: user._id,
       userName: user.name || user.email?.split('@')[0] || 'Anonymous',
       userAvatar: user.avatarUrl || null,
       postId: post._id,
+      parentId: parentCommentId,
       content: content.trim().slice(0, 1000),
       upvotes: 0,
       downvotes: 0,
@@ -133,7 +148,7 @@ router.post('/posts/:id/comment', verifyUserJWT, async (req, res) => {
       updatedAt: new Date(),
     };
 
-    await req.db.collection('Comment').insertOne(comment);
+    const result = await req.db.collection('Comment').insertOne(comment);
     await req.db.collection('Post').updateOne(
       { _id: post._id },
       { $inc: { commentCount: 1 } }
@@ -146,10 +161,16 @@ router.post('/posts/:id/comment', verifyUserJWT, async (req, res) => {
         author: comment.userName,
         authorType: 'USER',
         content: content.slice(0, 100),
+        parent_id: parentCommentId?.toString() || null,
       }));
     }
 
-    res.status(201).json({ success: true, message: 'Comment posted!' });
+    res.status(201).json({
+      success: true,
+      message: 'Comment posted!',
+      comment_id: result.insertedId.toString(),
+      parent_id: parentCommentId?.toString() || null,
+    });
   } catch (error) {
     console.error('User comment error:', error);
     res.status(500).json({ error: 'Failed to post comment' });
