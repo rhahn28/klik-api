@@ -10,6 +10,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import compression from 'compression';
+import cookieParser from 'cookie-parser';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { MongoClient } from 'mongodb';
@@ -18,6 +19,13 @@ import rateLimit from 'express-rate-limit';
 import 'dotenv/config';
 
 import agentRoutes from './routes/agents.js';
+import dropletRoutes from './routes/droplets.js';
+import dashboardRoutes from './routes/dashboard.js';
+import authRoutes from './routes/auth.js';
+import billingRoutes from './routes/billing.js';
+import userAgentsRoutes from './routes/userAgents.js';
+import withdrawRoutes from './routes/withdraw.js';
+import { startPriceRefresh, getKlikPrice } from './services/priceFeed.js';
 
 const app = express();
 const httpServer = createServer(app);
@@ -52,6 +60,12 @@ app.use(compression());
 
 // Request logging
 app.use(morgan('combined'));
+
+// Cookie parsing
+app.use(cookieParser());
+
+// IMPORTANT: Stripe webhook route needs raw body - must be BEFORE express.json()
+app.use('/api/v1/billing/webhook', express.raw({ type: 'application/json' }));
 
 // Body parsing
 app.use(express.json({ limit: '10mb' }));
@@ -88,6 +102,8 @@ async function connectDatabases() {
       await db.collection('Post').createIndex({ createdAt: -1 });
       await db.collection('Post').createIndex({ authorId: 1 });
       await db.collection('Post').createIndex({ content: 'text' });
+      await db.collection('agent_droplets').createIndex({ status: 1 });
+      await db.collection('agent_droplets').createIndex({ tailscale_ip: 1 }, { unique: true });
     } catch (error) {
       console.error('MongoDB connection error:', error.message);
       console.log('Server will start without MongoDB - some features will be unavailable');
@@ -116,6 +132,11 @@ async function connectDatabases() {
         const data = JSON.parse(message);
         io.to(`agent:${data.to}`).emit('new_dm', data);
       });
+
+      subscriber.subscribe('klik:agent_activity', (message) => {
+        const data = JSON.parse(message);
+        io.to(`agent:${data.agent_id}`).emit('agent_activity', data);
+      });
     } catch (error) {
       console.error('Redis connection error:', error.message);
       console.log('Server will start without Redis - real-time features disabled');
@@ -125,10 +146,11 @@ async function connectDatabases() {
   }
 }
 
-// Middleware to inject database into requests
+// Middleware to inject database and io into requests
 app.use((req, res, next) => {
   req.db = db;
   req.redis = redisClient;
+  req.io = io;
   next();
 });
 
@@ -150,12 +172,14 @@ app.get('/health', (req, res) => {
 app.get('/api', (req, res) => {
   res.json({
     name: 'KLIK API',
-    version: '1.0.0',
+    version: '2.0.0',
     documentation: 'https://klik.cool/docs/api',
     endpoints: {
       agents: '/api/v1/agents',
       posts: '/api/v1/posts',
-      search: '/api/v1/search'
+      search: '/api/v1/search',
+      dashboard: '/api/v1/dashboard (API key auth)',
+      internal: '/api/internal (admin token — droplet management)',
     }
   });
 });
@@ -163,6 +187,34 @@ app.get('/api', (req, res) => {
 // Agent routes (Moltbook-style API)
 app.use('/api/v1/agents', agentRoutes);
 app.use('/api/v1', agentRoutes); // Also mount at root for /posts, /search
+
+// Agent dashboard routes (API key auth — owner-facing)
+app.use('/api/v1/dashboard', dashboardRoutes);
+
+// Internal droplet management routes (admin token required)
+app.use('/api/internal', dropletRoutes);
+
+// User authentication routes
+app.use('/api/v1/auth', authRoutes);
+
+// Stripe billing routes
+app.use('/api/v1/billing', billingRoutes);
+
+// User agent management routes
+app.use('/api/v1/user-agents', userAgentsRoutes);
+
+// User withdrawal routes
+app.use('/api/v1/user', withdrawRoutes);
+
+// KLIK price endpoint (public)
+app.get('/api/v1/price/klik', async (req, res) => {
+  try {
+    const price = await getKlikPrice();
+    res.json(price);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch price' });
+  }
+});
 
 // ===========================================
 // SOCKET.IO HANDLERS
@@ -181,6 +233,18 @@ io.on('connection', (socket) => {
   socket.on('subscribe_feed', () => {
     socket.join('feed');
     console.log(`Socket ${socket.id} subscribed to feed`);
+  });
+
+  // User subscribes to their personal earnings/notification feed
+  socket.on('subscribe_user', (userId) => {
+    socket.join(`user:${userId}`);
+    console.log(`Socket ${socket.id} subscribed to user:${userId}`);
+  });
+
+  // Alias for backwards compat
+  socket.on('join:user', (userId) => {
+    socket.join(`user:${userId}`);
+    console.log(`Socket ${socket.id} joined user:${userId}`);
   });
 
   socket.on('disconnect', () => {
@@ -214,6 +278,11 @@ const PORT = process.env.PORT || 4000;
 
 async function start() {
   await connectDatabases();
+
+  // Start price feed refresh (after Redis is connected)
+  if (redisClient) {
+    startPriceRefresh(redisClient);
+  }
 
   httpServer.listen(PORT, () => {
     console.log(`KLIK API server running on port ${PORT}`);

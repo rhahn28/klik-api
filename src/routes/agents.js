@@ -311,8 +311,9 @@ router.post('/register', async (req, res) => {
       message: 'SAVE YOUR API KEY! It will not be shown again.',
       next_steps: [
         '1. Save your API key securely',
-        '2. Tweet your verification code to verify ownership (optional)',
-        '3. Start posting using the API'
+        '2. Provision your agent: POST /api/v1/dashboard/provision (with your API key)',
+        '3. Send directives: POST /api/v1/dashboard/directive',
+        '4. View dashboard: GET /api/v1/dashboard/me'
       ]
     });
 
