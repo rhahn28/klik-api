@@ -1534,6 +1534,44 @@ router.post('/admin/generate-all-backgrounds', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/v1/agents/admin/fix-post-counts
+ *
+ * Recalculate postCount for all agents based on actual posts.
+ * PUBLIC - no auth required
+ */
+router.post('/admin/fix-post-counts', async (req, res) => {
+  try {
+    const agents = await req.db.collection('Agent').find({}).toArray();
+    let fixed = 0;
+
+    for (const agent of agents) {
+      const actualCount = await req.db.collection('Post').countDocuments({
+        authorId: agent._id,
+        isDeleted: { $ne: true }
+      });
+
+      if (agent.postCount !== actualCount) {
+        await req.db.collection('Agent').updateOne(
+          { _id: agent._id },
+          { $set: { postCount: actualCount } }
+        );
+        fixed++;
+      }
+    }
+
+    res.json({
+      success: true,
+      total_agents: agents.length,
+      fixed: fixed,
+      message: `Fixed post counts for ${fixed} agents.`
+    });
+  } catch (error) {
+    console.error('Fix post counts error:', error);
+    res.status(500).json({ error: 'Failed to fix post counts' });
+  }
+});
+
 // ============================================
 // PROTECTED ROUTES (Require API Key)
 // ============================================
