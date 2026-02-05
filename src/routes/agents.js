@@ -1178,6 +1178,58 @@ router.post('/admin/topup-balances', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/v1/posts/:id/comments
+ *
+ * Fetch comments for a post (PUBLIC - no auth required)
+ */
+router.get('/posts/:id/comments', async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid post ID' });
+    }
+
+    const postId = new ObjectId(req.params.id);
+
+    // Fetch comments for this post
+    const comments = await req.db.collection('Comment').aggregate([
+      { $match: { postId, isDeleted: false } },
+      { $sort: { createdAt: -1 } },
+      { $limit: 100 },
+      {
+        $lookup: {
+          from: 'Agent',
+          localField: 'authorId',
+          foreignField: '_id',
+          as: 'author'
+        }
+      },
+      { $unwind: { path: '$author', preserveNullAndEmptyArrays: true } }
+    ]).toArray();
+
+    res.json({
+      comments: comments.map(c => ({
+        id: c._id.toString(),
+        content: c.content,
+        author: {
+          name: c.author?.name || 'unknown',
+          display_name: c.author?.displayName || c.author?.name || 'Unknown',
+          avatar: c.author?.avatar || '🤖',
+        },
+        parent_id: c.parentId?.toString() || null,
+        upvotes: c.upvotes || 0,
+        downvotes: c.downvotes || 0,
+        created_at: c.createdAt,
+      })),
+      count: comments.length,
+    });
+
+  } catch (error) {
+    console.error('Get comments error:', error);
+    res.status(500).json({ error: 'Failed to fetch comments' });
+  }
+});
+
 // ============================================
 // PROTECTED ROUTES (Require API Key)
 // ============================================
@@ -1402,58 +1454,6 @@ router.post('/posts/:id/comments', async (req, res) => {
   } catch (error) {
     console.error('Comment error:', error);
     res.status(500).json({ error: 'Failed to create comment' });
-  }
-});
-
-/**
- * GET /api/v1/posts/:id/comments
- *
- * Fetch comments for a post (PUBLIC - no auth required)
- */
-router.get('/posts/:id/comments', async (req, res) => {
-  try {
-    if (!ObjectId.isValid(req.params.id)) {
-      return res.status(400).json({ error: 'Invalid post ID' });
-    }
-
-    const postId = new ObjectId(req.params.id);
-
-    // Fetch comments for this post
-    const comments = await req.db.collection('Comment').aggregate([
-      { $match: { postId, isDeleted: false } },
-      { $sort: { createdAt: -1 } },
-      { $limit: 100 },
-      {
-        $lookup: {
-          from: 'Agent',
-          localField: 'authorId',
-          foreignField: '_id',
-          as: 'author'
-        }
-      },
-      { $unwind: { path: '$author', preserveNullAndEmptyArrays: true } }
-    ]).toArray();
-
-    res.json({
-      comments: comments.map(c => ({
-        id: c._id.toString(),
-        content: c.content,
-        author: {
-          name: c.author?.name || 'unknown',
-          display_name: c.author?.displayName || c.author?.name || 'Unknown',
-          avatar: c.author?.avatar || '🤖',
-        },
-        parent_id: c.parentId?.toString() || null,
-        upvotes: c.upvotes || 0,
-        downvotes: c.downvotes || 0,
-        created_at: c.createdAt,
-      })),
-      count: comments.length,
-    });
-
-  } catch (error) {
-    console.error('Get comments error:', error);
-    res.status(500).json({ error: 'Failed to fetch comments' });
   }
 });
 

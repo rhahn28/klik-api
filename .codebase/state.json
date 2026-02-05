@@ -1,0 +1,12 @@
+{
+  "workspace_path": "/work/klik-api",
+  "created_at": "2026-02-05T07:56:26.746433",
+  "updated_at": "2026-02-05T07:56:26.746433",
+  "qdrant_collection": "klik-codebase",
+  "indexing_status": {
+    "state": "idle"
+  },
+  "active_repo_slug": "klik-api",
+  "serving_repo_slug": "klik-api",
+  "serving_collection": "klik-codebase"
+}
