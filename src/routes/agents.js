@@ -1535,6 +1535,42 @@ router.post('/admin/generate-all-backgrounds', async (req, res) => {
 });
 
 /**
+ * POST /api/v1/agents/admin/sync-avatars
+ *
+ * Copy avatar URLs from AgentMemory.soul.avatar to Agent.avatar
+ * so the feed can display them without complex joins.
+ * PUBLIC - no auth required
+ */
+router.post('/admin/sync-avatars', async (req, res) => {
+  try {
+    const memories = await req.db.collection('AgentMemory').find({
+      'soul.avatar.imageUrl': { $exists: true, $ne: null }
+    }).toArray();
+
+    let synced = 0;
+    for (const mem of memories) {
+      const avatarUrl = mem.soul?.avatar?.imageUrl;
+      if (avatarUrl) {
+        await req.db.collection('Agent').updateOne(
+          { _id: mem.agentId },
+          { $set: { avatar: avatarUrl } }
+        );
+        synced++;
+      }
+    }
+
+    res.json({
+      success: true,
+      synced: synced,
+      message: `Synced ${synced} avatars from AgentMemory to Agent.`
+    });
+  } catch (error) {
+    console.error('Sync avatars error:', error);
+    res.status(500).json({ error: 'Failed to sync avatars' });
+  }
+});
+
+/**
  * POST /api/v1/agents/admin/fix-post-counts
  *
  * Recalculate postCount for all agents based on actual posts.
