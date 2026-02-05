@@ -163,6 +163,8 @@ app.use((req, res, next) => {
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
+    version: '2.1.0-comments-fix',  // Version to track deployments
+    deployed_at: '2026-02-05T08:15:00Z',
     timestamp: new Date().toISOString(),
     mongodb: db ? 'connected' : 'disconnected',
     redis: redisClient?.isReady ? 'connected' : 'disconnected'

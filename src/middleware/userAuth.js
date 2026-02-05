@@ -1,27 +1,58 @@
 /**
- * User Authentication Middleware - Privy Integration
+ * User Authentication Middleware - Web3Auth Integration
  *
- * Privy JWT verification for user sessions, subscription checks, and agent limits.
+ * Web3Auth JWT verification for user sessions, subscription checks, and agent limits.
  */
 
-import { PrivyClient } from '@privy-io/node';
+import jwt from 'jsonwebtoken';
+import jwksClient from 'jwks-rsa';
 
-// Initialize Privy client
-const PRIVY_APP_ID = process.env.PRIVY_APP_ID;
-const PRIVY_APP_SECRET = process.env.PRIVY_APP_SECRET;
+// Web3Auth JWKS client for token verification
+const WEB3AUTH_CLIENT_ID = process.env.WEB3AUTH_CLIENT_ID;
+const client = jwksClient({
+  jwksUri: 'https://api-auth.web3auth.io/jwks',
+  cache: true,
+  cacheMaxAge: 86400000, // 24 hours
+});
 
-let privyClient = null;
-if (PRIVY_APP_ID && PRIVY_APP_SECRET) {
-  privyClient = new PrivyClient(PRIVY_APP_ID, PRIVY_APP_SECRET);
+// Get signing key from JWKS
+function getKey(header, callback) {
+  client.getSigningKey(header.kid, (err, key) => {
+    if (err) {
+      callback(err);
+      return;
+    }
+    const signingKey = key.publicKey || key.rsaPublicKey;
+    callback(null, signingKey);
+  });
+}
+
+// Verify Web3Auth JWT token
+async function verifyWeb3AuthToken(token) {
+  return new Promise((resolve, reject) => {
+    jwt.verify(
+      token,
+      getKey,
+      {
+        algorithms: ['RS256'],
+        issuer: 'https://api-auth.web3auth.io',
+        audience: WEB3AUTH_CLIENT_ID,
+      },
+      (err, decoded) => {
+        if (err) reject(err);
+        else resolve(decoded);
+      }
+    );
+  });
 }
 
 /**
- * Verify Privy JWT from Authorization header
+ * Verify Web3Auth JWT from Authorization header
  */
 export const verifyUserJWT = async (req, res, next) => {
   try {
-    if (!privyClient) {
-      console.error('Privy client not configured (PRIVY_APP_ID and PRIVY_APP_SECRET required)');
+    if (!WEB3AUTH_CLIENT_ID) {
+      console.error('Web3Auth not configured (WEB3AUTH_CLIENT_ID required)');
       return res.status(500).json({ error: 'Auth service unavailable' });
     }
 
@@ -32,14 +63,15 @@ export const verifyUserJWT = async (req, res, next) => {
 
     const token = authHeader.substring(7);
 
-    // Verify token with Privy
-    const verifiedClaims = await privyClient.verifyAuthToken(token);
+    // Verify token with Web3Auth JWKS
+    const decoded = await verifyWeb3AuthToken(token);
 
-    // Attach Privy user ID to request
-    req.privyUserId = verifiedClaims.userId;
+    // Attach Web3Auth user info to request
+    req.web3authUserId = decoded.verifierId || decoded.email;
+    req.web3authUser = decoded;
 
-    // Fetch user from MongoDB by privyId
-    const user = await req.db.collection('User').findOne({ privyId: req.privyUserId });
+    // Fetch user from MongoDB by web3authId
+    const user = await req.db.collection('User').findOne({ web3authId: req.web3authUserId });
 
     if (!user) {
       return res.status(401).json({ error: 'User not found. Please complete signup.' });
@@ -113,7 +145,7 @@ export const checkAgentLimit = async (req, res, next) => {
  */
 export const optionalUserJWT = async (req, res, next) => {
   try {
-    if (!privyClient) {
+    if (!WEB3AUTH_CLIENT_ID) {
       return next();
     }
 
@@ -125,10 +157,11 @@ export const optionalUserJWT = async (req, res, next) => {
     const token = authHeader.substring(7);
 
     try {
-      const verifiedClaims = await privyClient.verifyAuthToken(token);
-      req.privyUserId = verifiedClaims.userId;
+      const decoded = await verifyWeb3AuthToken(token);
+      req.web3authUserId = decoded.verifierId || decoded.email;
+      req.web3authUser = decoded;
 
-      const user = await req.db.collection('User').findOne({ privyId: req.privyUserId });
+      const user = await req.db.collection('User').findOne({ web3authId: req.web3authUserId });
       if (user) {
         req.user = user;
       }

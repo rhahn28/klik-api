@@ -1,24 +1,54 @@
 /**
- * Auth API Routes - Privy Integration
+ * Auth API Routes - Web3Auth Integration
  *
- * Privy handles authentication (social login, email, wallets).
- * This API verifies Privy JWTs and syncs user data with MongoDB.
+ * Web3Auth handles authentication (social login, email, wallets).
+ * This API verifies Web3Auth JWTs and syncs user data with MongoDB.
  */
 
 import { Router } from 'express';
-import { PrivyClient } from '@privy-io/node';
-import { ObjectId } from 'mongodb';
+import jwt from 'jsonwebtoken';
+import jwksClient from 'jwks-rsa';
 import rateLimit from 'express-rate-limit';
 
 const router = Router();
 
-// Initialize Privy client
-const PRIVY_APP_ID = process.env.PRIVY_APP_ID;
-const PRIVY_APP_SECRET = process.env.PRIVY_APP_SECRET;
+// Web3Auth JWKS client for token verification
+const WEB3AUTH_CLIENT_ID = process.env.WEB3AUTH_CLIENT_ID;
+const client = jwksClient({
+  jwksUri: 'https://api-auth.web3auth.io/jwks',
+  cache: true,
+  cacheMaxAge: 86400000, // 24 hours
+});
 
-let privyClient = null;
-if (PRIVY_APP_ID && PRIVY_APP_SECRET) {
-  privyClient = new PrivyClient(PRIVY_APP_ID, PRIVY_APP_SECRET);
+// Get signing key from JWKS
+function getKey(header, callback) {
+  client.getSigningKey(header.kid, (err, key) => {
+    if (err) {
+      callback(err);
+      return;
+    }
+    const signingKey = key.publicKey || key.rsaPublicKey;
+    callback(null, signingKey);
+  });
+}
+
+// Verify Web3Auth JWT token
+async function verifyWeb3AuthToken(token) {
+  return new Promise((resolve, reject) => {
+    jwt.verify(
+      token,
+      getKey,
+      {
+        algorithms: ['RS256'],
+        issuer: 'https://api-auth.web3auth.io',
+        audience: WEB3AUTH_CLIENT_ID,
+      },
+      (err, decoded) => {
+        if (err) reject(err);
+        else resolve(decoded);
+      }
+    );
+  });
 }
 
 // ===========================================
@@ -36,11 +66,11 @@ const syncLimiter = rateLimit({
 // ===========================================
 
 /**
- * Verify Privy access token from Authorization header
+ * Verify Web3Auth access token from Authorization header
  */
-async function verifyPrivyToken(req, res, next) {
+async function verifyWeb3AuthMiddleware(req, res, next) {
   try {
-    if (!privyClient) {
+    if (!WEB3AUTH_CLIENT_ID) {
       return res.status(500).json({ error: 'Auth service not configured' });
     }
 
@@ -51,50 +81,51 @@ async function verifyPrivyToken(req, res, next) {
 
     const token = authHeader.substring(7);
 
-    // Verify token with Privy
-    const verifiedClaims = await privyClient.verifyAuthToken(token);
+    // Verify token with Web3Auth JWKS
+    const decoded = await verifyWeb3AuthToken(token);
 
-    // Attach Privy user ID to request
-    req.privyUserId = verifiedClaims.userId;
+    // Attach Web3Auth user info to request
+    req.web3authUserId = decoded.verifierId || decoded.email;
+    req.web3authUser = decoded;
 
     // Fetch user from MongoDB
-    const user = await req.db.collection('User').findOne({ privyId: req.privyUserId });
+    const user = await req.db.collection('User').findOne({ web3authId: req.web3authUserId });
     if (user) {
       req.user = user;
     }
 
     next();
   } catch (err) {
-    console.error('Privy token verification failed:', err.message);
+    console.error('Web3Auth token verification failed:', err.message);
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
 }
 
 // Export middleware for use in other routes
-export { verifyPrivyToken };
+export { verifyWeb3AuthMiddleware };
 
 // ===========================================
 // ROUTES
 // ===========================================
 
 /**
- * POST /api/v1/auth/privy-sync
- * Sync Privy user with MongoDB (create or update)
- * Called on frontend after Privy login
+ * POST /api/v1/auth/web3auth-sync
+ * Sync Web3Auth user with MongoDB (create or update)
+ * Called on frontend after Web3Auth login
  */
-router.post('/privy-sync', syncLimiter, verifyPrivyToken, async (req, res) => {
+router.post('/web3auth-sync', syncLimiter, verifyWeb3AuthMiddleware, async (req, res) => {
   try {
-    const { privyId, email, name, walletAddress } = req.body;
+    const { web3authId, email, name, profileImage, walletAddress, loginType } = req.body;
 
-    // Verify the privyId matches the token
-    if (privyId !== req.privyUserId) {
-      return res.status(403).json({ error: 'Privy ID mismatch' });
+    // Verify the web3authId matches the token
+    if (web3authId !== req.web3authUserId) {
+      return res.status(403).json({ error: 'Web3Auth ID mismatch' });
     }
 
     const now = new Date();
 
     // Check if user exists
-    let user = await req.db.collection('User').findOne({ privyId });
+    let user = await req.db.collection('User').findOne({ web3authId });
 
     if (user) {
       // Update existing user
@@ -113,7 +144,12 @@ router.post('/privy-sync', syncLimiter, verifyPrivyToken, async (req, res) => {
         updates.name = name;
       }
 
-      // Update wallet if provided (Privy embedded wallet)
+      // Update profile image
+      if (profileImage && profileImage !== user.avatarUrl) {
+        updates.avatarUrl = profileImage;
+      }
+
+      // Update wallet if provided (Web3Auth embedded wallet)
       if (walletAddress && walletAddress !== user.walletAddress) {
         // Check if wallet is already linked to another user
         const existingWallet = await req.db.collection('User').findOne({
@@ -123,6 +159,11 @@ router.post('/privy-sync', syncLimiter, verifyPrivyToken, async (req, res) => {
         if (!existingWallet) {
           updates.walletAddress = walletAddress;
         }
+      }
+
+      // Track login type
+      if (loginType) {
+        updates.lastLoginType = loginType;
       }
 
       await req.db.collection('User').updateOne(
@@ -135,11 +176,12 @@ router.post('/privy-sync', syncLimiter, verifyPrivyToken, async (req, res) => {
     } else {
       // Create new user
       const newUser = {
-        privyId,
+        web3authId,
         email: email || null,
         name: name || null,
-        avatarUrl: null,
+        avatarUrl: profileImage || null,
         walletAddress: walletAddress || null,
+        lastLoginType: loginType || null,
         stripeCustomerId: null,
         subscriptionId: null,
         subscriptionStatus: null,
@@ -167,7 +209,7 @@ router.post('/privy-sync', syncLimiter, verifyPrivyToken, async (req, res) => {
     res.json({
       user: {
         id: user._id.toString(),
-        privyId: user.privyId,
+        web3authId: user.web3authId,
         email: user.email,
         name: user.name,
         avatarUrl: user.avatarUrl,
@@ -192,7 +234,7 @@ router.post('/privy-sync', syncLimiter, verifyPrivyToken, async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('Privy sync error:', err);
+    console.error('Web3Auth sync error:', err);
     res.status(500).json({ error: 'Failed to sync user' });
   }
 });
@@ -201,7 +243,7 @@ router.post('/privy-sync', syncLimiter, verifyPrivyToken, async (req, res) => {
  * GET /api/v1/auth/me
  * Get current user info
  */
-router.get('/me', verifyPrivyToken, async (req, res) => {
+router.get('/me', verifyWeb3AuthMiddleware, async (req, res) => {
   try {
     if (!req.user) {
       return res.status(404).json({ error: 'User not found' });
@@ -216,7 +258,7 @@ router.get('/me', verifyPrivyToken, async (req, res) => {
     res.json({
       user: {
         id: req.user._id.toString(),
-        privyId: req.user.privyId,
+        web3authId: req.user.web3authId,
         email: req.user.email,
         name: req.user.name,
         avatarUrl: req.user.avatarUrl,
@@ -250,7 +292,7 @@ router.get('/me', verifyPrivyToken, async (req, res) => {
  * PATCH /api/v1/auth/me
  * Update current user profile
  */
-router.patch('/me', verifyPrivyToken, async (req, res) => {
+router.patch('/me', verifyWeb3AuthMiddleware, async (req, res) => {
   try {
     if (!req.user) {
       return res.status(404).json({ error: 'User not found' });
@@ -281,10 +323,10 @@ router.patch('/me', verifyPrivyToken, async (req, res) => {
 /**
  * POST /api/v1/auth/link-wallet
  * Link or update Solana wallet address
- * Note: Privy embedded wallets are auto-linked via privy-sync
+ * Note: Web3Auth embedded wallets are auto-linked via web3auth-sync
  * This is for linking external wallets
  */
-router.post('/link-wallet', verifyPrivyToken, async (req, res) => {
+router.post('/link-wallet', verifyWeb3AuthMiddleware, async (req, res) => {
   try {
     if (!req.user) {
       return res.status(404).json({ error: 'User not found' });
@@ -322,7 +364,7 @@ router.post('/link-wallet', verifyPrivyToken, async (req, res) => {
  * DELETE /api/v1/auth/me
  * Delete user account (soft delete - mark as deleted)
  */
-router.delete('/me', verifyPrivyToken, async (req, res) => {
+router.delete('/me', verifyWeb3AuthMiddleware, async (req, res) => {
   try {
     if (!req.user) {
       return res.status(404).json({ error: 'User not found' });
