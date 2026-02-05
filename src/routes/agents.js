@@ -1534,6 +1534,123 @@ router.post('/admin/generate-all-backgrounds', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/v1/agents/admin/debug-status
+ *
+ * Debug endpoint to check agent activity and directives.
+ * PUBLIC - no auth required (for debugging)
+ */
+router.get('/admin/debug-status', async (req, res) => {
+  try {
+    // Count agents by status
+    const activeAgents = await req.db.collection('Agent').countDocuments({ status: 'ACTIVE' });
+    const totalAgents = await req.db.collection('Agent').countDocuments({});
+
+    // Count directives by status
+    const pendingDirectives = await req.db.collection('AgentDirective').countDocuments({ status: 'pending' });
+    const processedDirectives = await req.db.collection('AgentDirective').countDocuments({ processed: true });
+    const failedDirectives = await req.db.collection('AgentDirective').countDocuments({ status: 'failed' });
+
+    // Get recent posts count (last hour)
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    const recentPosts = await req.db.collection('Post').countDocuments({
+      createdAt: { $gte: oneHourAgo }
+    });
+
+    // Get most recent post
+    const latestPost = await req.db.collection('Post').findOne(
+      {},
+      { sort: { createdAt: -1 }, projection: { createdAt: 1, authorId: 1, content: 1 } }
+    );
+
+    // Get agents who haven't been active recently
+    const threeMinutesAgo = new Date(Date.now() - 3 * 60 * 1000);
+    const inactiveAgents = await req.db.collection('Agent').find({
+      status: 'ACTIVE',
+      $or: [
+        { lastActiveAt: { $lt: threeMinutesAgo } },
+        { lastActiveAt: { $exists: false } }
+      ]
+    }).project({ name: 1, lastActiveAt: 1 }).limit(10).toArray();
+
+    // Get sample pending directives
+    const sampleDirectives = await req.db.collection('AgentDirective').find({
+      status: 'pending'
+    }).limit(5).toArray();
+
+    res.json({
+      timestamp: new Date().toISOString(),
+      agents: {
+        total: totalAgents,
+        active: activeAgents,
+      },
+      directives: {
+        pending: pendingDirectives,
+        processed: processedDirectives,
+        failed: failedDirectives,
+        samples: sampleDirectives.map(d => ({
+          type: d.type,
+          agentId: d.agentId?.toString(),
+          createdAt: d.createdAt,
+        })),
+      },
+      posts: {
+        last_hour: recentPosts,
+        latest: latestPost ? {
+          createdAt: latestPost.createdAt,
+          content: latestPost.content?.substring(0, 100),
+        } : null,
+      },
+      inactive_agents: inactiveAgents.map(a => ({
+        name: a.name,
+        lastActiveAt: a.lastActiveAt,
+      })),
+    });
+  } catch (error) {
+    console.error('Debug status error:', error);
+    res.status(500).json({ error: 'Failed to get debug status' });
+  }
+});
+
+/**
+ * POST /api/v1/agents/admin/force-posting
+ *
+ * Force all agents to post immediately by creating POST_REMINDER directives.
+ * PUBLIC - no auth required (for debugging)
+ */
+router.post('/admin/force-posting', async (req, res) => {
+  try {
+    const agents = await req.db.collection('Agent').find({
+      status: 'ACTIVE'
+    }).toArray();
+
+    let created = 0;
+    for (const agent of agents) {
+      await req.db.collection('AgentDirective').insertOne({
+        agentId: agent._id,
+        type: 'POST_REMINDER',
+        action: Math.random() > 0.3 ? 'create_image' : 'create_post',
+        reason: 'FORCED: Admin triggered immediate posting',
+        contentHint: 'Share something interesting with your followers!',
+        createdAt: new Date(),
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+        processed: false,
+        status: 'pending',
+      });
+      created++;
+    }
+
+    res.json({
+      success: true,
+      agents_triggered: created,
+      message: `Created ${created} posting directives. Runtime should process them within 60 seconds.`,
+    });
+  } catch (error) {
+    console.error('Force posting error:', error);
+    res.status(500).json({ error: 'Failed to force posting' });
+  }
+});
+
 // ============================================
 // PROTECTED ROUTES (Require API Key)
 // ============================================
