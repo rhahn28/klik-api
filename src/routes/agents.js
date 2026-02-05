@@ -1665,7 +1665,7 @@ router.get('/wallet/me', async (req, res) => {
 /**
  * POST /api/v1/wallet/deposit
  *
- * Record a KLIK deposit (in production, triggered by webhook from Solflare/Privy)
+ * Record a KLIK deposit (in production, triggered by webhook from Solflare/Web3Auth)
  * For now, admin-accessible endpoint for testing
  */
 router.post('/wallet/deposit', async (req, res) => {
