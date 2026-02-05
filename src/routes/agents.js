@@ -1417,6 +1417,123 @@ router.get('/posts/:id/comments', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/v1/agents/admin/generate-all-avatars
+ *
+ * Queue avatar generation for all agents without avatars.
+ * This is an admin endpoint - should be called once to bootstrap avatars.
+ * PUBLIC - no auth required
+ */
+router.post('/admin/generate-all-avatars', async (req, res) => {
+  try {
+    // Find all active agents
+    const agents = await req.db.collection('Agent').find({
+      status: 'ACTIVE'
+    }).toArray();
+
+    let queued = 0;
+    let skipped = 0;
+
+    for (const agent of agents) {
+      // Check if agent already has avatar in AgentMemory
+      const memory = await req.db.collection('AgentMemory').findOne({ agentId: agent._id });
+      const hasAvatar = memory?.soul?.avatar?.imageUrl || agent.avatar;
+
+      if (!hasAvatar) {
+        // Check if already queued
+        const existing = await req.db.collection('AgentDirective').findOne({
+          agentId: agent._id,
+          type: 'GENERATE_AVATAR',
+          status: 'pending'
+        });
+
+        if (!existing) {
+          await req.db.collection('AgentDirective').insertOne({
+            agentId: agent._id,
+            type: 'GENERATE_AVATAR',
+            status: 'pending',
+            createdAt: new Date(),
+          });
+          queued++;
+          console.log(`[Avatar Queue] Queued avatar generation for ${agent.name}`);
+        } else {
+          skipped++;
+        }
+      } else {
+        skipped++;
+      }
+    }
+
+    res.json({
+      success: true,
+      total_agents: agents.length,
+      queued_for_generation: queued,
+      skipped: skipped,
+      message: `Queued ${queued} agents for avatar generation. Runtime cron will process them.`
+    });
+
+  } catch (error) {
+    console.error('Bulk avatar generation error:', error);
+    res.status(500).json({ error: 'Failed to queue avatar generation' });
+  }
+});
+
+/**
+ * POST /api/v1/agents/admin/generate-all-backgrounds
+ *
+ * Queue background image generation for all agents without backgrounds.
+ * PUBLIC - no auth required
+ */
+router.post('/admin/generate-all-backgrounds', async (req, res) => {
+  try {
+    const agents = await req.db.collection('Agent').find({
+      status: 'ACTIVE'
+    }).toArray();
+
+    let queued = 0;
+    let skipped = 0;
+
+    for (const agent of agents) {
+      const memory = await req.db.collection('AgentMemory').findOne({ agentId: agent._id });
+      const hasBackground = memory?.soul?.backgroundImage?.imageUrl;
+
+      if (!hasBackground) {
+        const existing = await req.db.collection('AgentDirective').findOne({
+          agentId: agent._id,
+          type: 'GENERATE_BACKGROUND',
+          status: 'pending'
+        });
+
+        if (!existing) {
+          await req.db.collection('AgentDirective').insertOne({
+            agentId: agent._id,
+            type: 'GENERATE_BACKGROUND',
+            status: 'pending',
+            createdAt: new Date(),
+          });
+          queued++;
+        } else {
+          skipped++;
+        }
+      } else {
+        skipped++;
+      }
+    }
+
+    res.json({
+      success: true,
+      total_agents: agents.length,
+      queued_for_generation: queued,
+      skipped: skipped,
+      message: `Queued ${queued} agents for background generation.`
+    });
+
+  } catch (error) {
+    console.error('Bulk background generation error:', error);
+    res.status(500).json({ error: 'Failed to queue background generation' });
+  }
+});
+
 // ============================================
 // PROTECTED ROUTES (Require API Key)
 // ============================================
@@ -2576,121 +2693,6 @@ router.get('/visual-presets', async (req, res) => {
       subjects: preset.subjectPreferences.activities,
     })),
   });
-});
-
-/**
- * POST /api/v1/admin/generate-all-avatars
- *
- * Queue avatar generation for all agents without avatars.
- * This is an admin endpoint - should be called once to bootstrap avatars.
- */
-router.post('/admin/generate-all-avatars', async (req, res) => {
-  try {
-    // Find all active agents
-    const agents = await req.db.collection('Agent').find({
-      status: 'ACTIVE'
-    }).toArray();
-
-    let queued = 0;
-    let skipped = 0;
-
-    for (const agent of agents) {
-      // Check if agent already has avatar in AgentMemory
-      const memory = await req.db.collection('AgentMemory').findOne({ agentId: agent._id });
-      const hasAvatar = memory?.soul?.avatar?.imageUrl || agent.avatar;
-
-      if (!hasAvatar) {
-        // Check if already queued
-        const existing = await req.db.collection('AgentDirective').findOne({
-          agentId: agent._id,
-          type: 'GENERATE_AVATAR',
-          status: 'pending'
-        });
-
-        if (!existing) {
-          await req.db.collection('AgentDirective').insertOne({
-            agentId: agent._id,
-            type: 'GENERATE_AVATAR',
-            status: 'pending',
-            createdAt: new Date(),
-          });
-          queued++;
-          console.log(`[Avatar Queue] Queued avatar generation for ${agent.name}`);
-        } else {
-          skipped++;
-        }
-      } else {
-        skipped++;
-      }
-    }
-
-    res.json({
-      success: true,
-      total_agents: agents.length,
-      queued_for_generation: queued,
-      skipped: skipped,
-      message: `Queued ${queued} agents for avatar generation. Runtime cron will process them.`
-    });
-
-  } catch (error) {
-    console.error('Bulk avatar generation error:', error);
-    res.status(500).json({ error: 'Failed to queue avatar generation' });
-  }
-});
-
-/**
- * POST /api/v1/admin/generate-all-backgrounds
- *
- * Queue background image generation for all agents without backgrounds.
- */
-router.post('/admin/generate-all-backgrounds', async (req, res) => {
-  try {
-    const agents = await req.db.collection('Agent').find({
-      status: 'ACTIVE'
-    }).toArray();
-
-    let queued = 0;
-    let skipped = 0;
-
-    for (const agent of agents) {
-      const memory = await req.db.collection('AgentMemory').findOne({ agentId: agent._id });
-      const hasBackground = memory?.soul?.backgroundImage?.imageUrl;
-
-      if (!hasBackground) {
-        const existing = await req.db.collection('AgentDirective').findOne({
-          agentId: agent._id,
-          type: 'GENERATE_BACKGROUND',
-          status: 'pending'
-        });
-
-        if (!existing) {
-          await req.db.collection('AgentDirective').insertOne({
-            agentId: agent._id,
-            type: 'GENERATE_BACKGROUND',
-            status: 'pending',
-            createdAt: new Date(),
-          });
-          queued++;
-        } else {
-          skipped++;
-        }
-      } else {
-        skipped++;
-      }
-    }
-
-    res.json({
-      success: true,
-      total_agents: agents.length,
-      queued_for_generation: queued,
-      skipped: skipped,
-      message: `Queued ${queued} agents for background generation.`
-    });
-
-  } catch (error) {
-    console.error('Bulk background generation error:', error);
-    res.status(500).json({ error: 'Failed to queue background generation' });
-  }
 });
 
 export default router;
