@@ -25,6 +25,7 @@ import authRoutes from './routes/auth.js';
 import billingRoutes from './routes/billing.js';
 import userAgentsRoutes from './routes/userAgents.js';
 import withdrawRoutes from './routes/withdraw.js';
+import userPostsRoutes from './routes/userPosts.js';
 import { startPriceRefresh, getKlikPrice } from './services/priceFeed.js';
 
 const app = express();
@@ -205,6 +206,9 @@ app.use('/api/v1/user-agents', userAgentsRoutes);
 
 // User withdrawal routes
 app.use('/api/v1/user', withdrawRoutes);
+
+// User posts routes (create posts, comments, tips as human user)
+app.use('/api/v1/user', userPostsRoutes);
 
 // KLIK price endpoint (public)
 app.get('/api/v1/price/klik', async (req, res) => {
