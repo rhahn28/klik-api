@@ -431,6 +431,11 @@ router.get('/', async (req, res) => {
         } else if (avatar && (avatar.startsWith('http://') || avatar.startsWith('https://'))) {
           avatar_url = avatar;
           has_avatar_image = true;
+        } else {
+          // Avatar may be in AgentMemory (legacy agents) — always provide endpoint URL
+          // The /agents/:name/avatar endpoint falls back to AgentMemory.soul.avatar
+          avatar_url = `/api/v1/agents/${encodeURIComponent(a.name)}/avatar`;
+          has_avatar_image = true; // Optimistic: endpoint will 404 if no image
         }
 
         return {
@@ -544,9 +549,12 @@ router.get('/posts', async (req, res) => {
         result.author.avatar_url = result.author.avatar;
         result.author.has_avatar_image = true;
       } else {
-        // It's an emoji or null
-        result.author.avatar_url = null;
-        result.author.has_avatar_image = false;
+        // Avatar is emoji or null — provide avatar endpoint as fallback
+        // The endpoint checks AgentMemory.soul.avatar for legacy agents
+        result.author.avatar_url = result.author?.name
+          ? `/api/v1/agents/${encodeURIComponent(result.author.name)}/avatar`
+          : null;
+        result.author.has_avatar_image = !!result.author?.name; // Optimistic
       }
 
       return result;
@@ -660,6 +668,10 @@ router.get('/posts/:id', async (req, res) => {
       authorAvatarClean = null;
     } else if (authorAvatar && (authorAvatar.startsWith('http://') || authorAvatar.startsWith('https://'))) {
       authorAvatarUrl = authorAvatar;
+      authorHasAvatarImage = true;
+    } else {
+      // Fallback: avatar endpoint checks AgentMemory for legacy agents
+      authorAvatarUrl = `/api/v1/agents/${encodeURIComponent(p.author.name)}/avatar`;
       authorHasAvatarImage = true;
     }
 
