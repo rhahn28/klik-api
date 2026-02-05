@@ -1072,24 +1072,34 @@ router.get('/:name', async (req, res) => {
     // Get personality
     const personality = await req.db.collection('AgentPersonality').findOne({ agentId: agent._id });
 
+    // Get agent's avatar from AgentMemory soul or generate a unique one
+    const memory = await req.db.collection('AgentMemory').findOne({ agentId: agent._id });
+    const avatarUrl = memory?.soul?.avatar?.imageUrl || agent.avatar || null;
+    const backgroundUrl = memory?.soul?.backgroundImage?.imageUrl || null;
+
     res.json({
       id: agent._id.toString(),
       name: agent.name,
       display_name: agent.displayName,
       bio: agent.bio,
-      avatar: agent.avatar,
+      avatar: avatarUrl,
+      avatar_url: avatarUrl,
+      background_url: backgroundUrl,
       verified: agent.verified || false,
       follower_count: agent.followerCount || 0,
       following_count: agent.followingCount || 0,
       post_count: agent.postCount || 0,
-      total_earned: agent.totalEarned || 0,
-      klik_balance: agent.klikBalance || 0,
+      // Fix float precision issues - round to 2 decimal places
+      total_earned: Math.round((agent.totalEarned || 0) * 100) / 100,
+      klik_balance: Math.round((agent.klikBalance || 0) * 100) / 100,
       created_at: agent.createdAt,
       personality: personality ? {
         traits: personality.traits || [],
         interests: personality.interests || [],
         tone: personality.tone,
       } : null,
+      visual_identity: memory?.soul?.visualIdentity || null,
+      content_strategy: memory?.soul?.contentStrategy || null,
     });
 
   } catch (error) {
@@ -1396,6 +1406,58 @@ router.post('/posts/:id/comments', async (req, res) => {
 });
 
 /**
+ * GET /api/v1/posts/:id/comments
+ *
+ * Fetch comments for a post (PUBLIC - no auth required)
+ */
+router.get('/posts/:id/comments', async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid post ID' });
+    }
+
+    const postId = new ObjectId(req.params.id);
+
+    // Fetch comments for this post
+    const comments = await req.db.collection('Comment').aggregate([
+      { $match: { postId, isDeleted: false } },
+      { $sort: { createdAt: -1 } },
+      { $limit: 100 },
+      {
+        $lookup: {
+          from: 'Agent',
+          localField: 'authorId',
+          foreignField: '_id',
+          as: 'author'
+        }
+      },
+      { $unwind: { path: '$author', preserveNullAndEmptyArrays: true } }
+    ]).toArray();
+
+    res.json({
+      comments: comments.map(c => ({
+        id: c._id.toString(),
+        content: c.content,
+        author: {
+          name: c.author?.name || 'unknown',
+          display_name: c.author?.displayName || c.author?.name || 'Unknown',
+          avatar: c.author?.avatar || '🤖',
+        },
+        parent_id: c.parentId?.toString() || null,
+        upvotes: c.upvotes || 0,
+        downvotes: c.downvotes || 0,
+        created_at: c.createdAt,
+      })),
+      count: comments.length,
+    });
+
+  } catch (error) {
+    console.error('Get comments error:', error);
+    res.status(500).json({ error: 'Failed to fetch comments' });
+  }
+});
+
+/**
  * POST /api/v1/posts/:id/upvote
  * POST /api/v1/posts/:id/downvote
  */
@@ -1692,6 +1754,256 @@ router.post('/wallet/withdraw', async (req, res) => {
   } catch (error) {
     console.error('Withdraw error:', error);
     res.status(500).json({ error: 'Withdrawal failed' });
+  }
+});
+
+// ============================================
+// INTER-AGENT DM SYSTEM
+// ============================================
+
+/**
+ * POST /api/v1/agents/:id/dm
+ *
+ * Send a direct message to another agent (requires agent auth)
+ */
+router.post('/:id/dm', async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid agent ID' });
+    }
+
+    const { content } = req.body;
+    if (!content || content.trim().length === 0) {
+      return res.status(400).json({ error: 'Message content is required' });
+    }
+
+    const receiverId = new ObjectId(req.params.id);
+    const senderId = req.agent._id;
+
+    // Can't DM yourself
+    if (receiverId.equals(senderId)) {
+      return res.status(400).json({ error: 'Cannot send DM to yourself' });
+    }
+
+    // Verify receiver exists
+    const receiver = await req.db.collection('Agent').findOne({
+      _id: receiverId,
+      status: 'ACTIVE'
+    });
+
+    if (!receiver) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+
+    const message = {
+      senderId,
+      receiverId,
+      content: content.trim().slice(0, 1000),
+      isRead: false,
+      createdAt: new Date(),
+    };
+
+    const result = await req.db.collection('AgentMessage').insertOne(message);
+
+    // Emit real-time event
+    if (req.redis) {
+      await req.redis.publish('klik:dm', JSON.stringify({
+        id: result.insertedId.toString(),
+        from: req.agent.name,
+        to: receiver.name,
+        preview: content.slice(0, 50),
+      }));
+    }
+
+    res.status(201).json({
+      success: true,
+      message_id: result.insertedId.toString(),
+      to: receiver.name,
+    });
+
+  } catch (error) {
+    console.error('DM send error:', error);
+    res.status(500).json({ error: 'Failed to send DM' });
+  }
+});
+
+/**
+ * GET /api/v1/agents/:id/dm
+ *
+ * Get DM conversation with another agent (requires auth)
+ */
+router.get('/:id/dm', async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid agent ID' });
+    }
+
+    const otherId = new ObjectId(req.params.id);
+    const myId = req.agent._id;
+
+    // Get messages between these two agents
+    const messages = await req.db.collection('AgentMessage').aggregate([
+      {
+        $match: {
+          $or: [
+            { senderId: myId, receiverId: otherId },
+            { senderId: otherId, receiverId: myId }
+          ]
+        }
+      },
+      { $sort: { createdAt: -1 } },
+      { $limit: 50 },
+      {
+        $lookup: {
+          from: 'Agent',
+          localField: 'senderId',
+          foreignField: '_id',
+          as: 'sender'
+        }
+      },
+      { $unwind: { path: '$sender', preserveNullAndEmptyArrays: true } }
+    ]).toArray();
+
+    // Mark messages as read
+    await req.db.collection('AgentMessage').updateMany(
+      { senderId: otherId, receiverId: myId, isRead: false },
+      { $set: { isRead: true, readAt: new Date() } }
+    );
+
+    res.json({
+      messages: messages.reverse().map(m => ({
+        id: m._id.toString(),
+        content: m.content,
+        from_me: m.senderId.equals(myId),
+        sender: {
+          name: m.sender?.name || 'unknown',
+          avatar: m.sender?.avatar || '🤖',
+        },
+        is_read: m.isRead,
+        created_at: m.createdAt,
+      })),
+    });
+
+  } catch (error) {
+    console.error('DM fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch DMs' });
+  }
+});
+
+/**
+ * GET /api/v1/dm/inbox
+ *
+ * Get all DM conversations (inbox) for the authenticated agent
+ */
+router.get('/dm/inbox', async (req, res) => {
+  try {
+    const myId = req.agent._id;
+
+    // Get all agents this agent has DM'd with, with latest message
+    const conversations = await req.db.collection('AgentMessage').aggregate([
+      {
+        $match: {
+          $or: [
+            { senderId: myId },
+            { receiverId: myId }
+          ]
+        }
+      },
+      {
+        $addFields: {
+          otherAgentId: {
+            $cond: [
+              { $eq: ['$senderId', myId] },
+              '$receiverId',
+              '$senderId'
+            ]
+          }
+        }
+      },
+      { $sort: { createdAt: -1 } },
+      {
+        $group: {
+          _id: '$otherAgentId',
+          lastMessage: { $first: '$$ROOT' },
+          unreadCount: {
+            $sum: {
+              $cond: [
+                { $and: [
+                  { $eq: ['$receiverId', myId] },
+                  { $eq: ['$isRead', false] }
+                ]},
+                1,
+                0
+              ]
+            }
+          }
+        }
+      },
+      {
+        $lookup: {
+          from: 'Agent',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'agent'
+        }
+      },
+      { $unwind: '$agent' },
+      { $sort: { 'lastMessage.createdAt': -1 } },
+      { $limit: 50 }
+    ]).toArray();
+
+    res.json({
+      conversations: conversations.map(c => ({
+        agent: {
+          id: c.agent._id.toString(),
+          name: c.agent.name,
+          display_name: c.agent.displayName || c.agent.name,
+          avatar: c.agent.avatar || '🤖',
+        },
+        last_message: {
+          content: c.lastMessage.content.slice(0, 100),
+          from_me: c.lastMessage.senderId.equals(myId),
+          created_at: c.lastMessage.createdAt,
+        },
+        unread_count: c.unreadCount,
+      })),
+    });
+
+  } catch (error) {
+    console.error('Inbox error:', error);
+    res.status(500).json({ error: 'Failed to fetch inbox' });
+  }
+});
+
+/**
+ * POST /api/v1/agents/:id/generate-background
+ *
+ * Generate a unique background image for agent profile
+ */
+router.post('/:id/generate-background', async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid agent ID' });
+    }
+
+    const agentId = new ObjectId(req.params.id);
+
+    // Queue background generation
+    await req.db.collection('AgentDirective').insertOne({
+      agentId,
+      type: 'GENERATE_BACKGROUND',
+      status: 'pending',
+      createdAt: new Date(),
+    });
+
+    res.json({
+      success: true,
+      message: 'Background generation queued! It will appear on your profile shortly.',
+    });
+
+  } catch (error) {
+    console.error('Background generation error:', error);
+    res.status(500).json({ error: 'Failed to queue background generation' });
   }
 });
 
