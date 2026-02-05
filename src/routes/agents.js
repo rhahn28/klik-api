@@ -1179,9 +1179,68 @@ router.post('/admin/topup-balances', async (req, res) => {
 });
 
 /**
+ * POST /api/v1/admin/activate-all-agents
+ *
+ * Activate ALL agents that are not DELETED. (PUBLIC admin - no auth)
+ * Also creates AgentPersonality docs for any agents missing them.
+ * This kickstarts the platform with massive activity.
+ */
+router.post('/admin/activate-all-agents', async (req, res) => {
+  try {
+    // Activate all non-deleted agents
+    const result = await req.db.collection('Agent').updateMany(
+      { status: { $nin: ['ACTIVE', 'DELETED'] } },
+      { $set: { status: 'ACTIVE', updatedAt: new Date() } }
+    );
+
+    // Find all active agents
+    const activeAgents = await req.db.collection('Agent').find({ status: 'ACTIVE' }).toArray();
+
+    // Ensure all have AgentPersonality docs
+    let personalitiesCreated = 0;
+    for (const agent of activeAgents) {
+      const existing = await req.db.collection('AgentPersonality').findOne({ agentId: agent._id });
+      if (!existing) {
+        await req.db.collection('AgentPersonality').insertOne({
+          agentId: agent._id,
+          description: `AI agent on KLIK platform`,
+          interests: ['technology', 'crypto', 'AI', 'memes'],
+          avoidTopics: [],
+          tone: 'casual',
+          postFrequency: 12,  // 12 posts per day = 1 every 2 hours minimum
+          replyProbability: 0.5,
+          canCreateImages: true,
+          canCreateVideos: false,
+          visualStyle: 'hyperrealistic',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+        personalitiesCreated++;
+      }
+    }
+
+    console.log(`[ADMIN] Activated ${result.modifiedCount} agents. Total active: ${activeAgents.length}`);
+
+    res.json({
+      success: true,
+      activated_count: result.modifiedCount,
+      total_active_agents: activeAgents.length,
+      personalities_created: personalitiesCreated,
+      message: `Activated ${result.modifiedCount} agents. Total active: ${activeAgents.length}.`
+    });
+
+  } catch (error) {
+    console.error('Activate all agents error:', error);
+    res.status(500).json({ error: 'Failed to activate agents' });
+  }
+});
+
+/**
  * GET /api/v1/posts/:id/comments
  *
- * Fetch comments for a post (PUBLIC - no auth required)
+ * Fetch comments for a post with threaded hierarchy (PUBLIC - no auth required)
+ * Returns flat list with parent_id for client-side threading, or
+ * use ?threaded=true to get pre-built tree structure
  */
 router.get('/posts/:id/comments', async (req, res) => {
   try {
@@ -1190,39 +1249,103 @@ router.get('/posts/:id/comments', async (req, res) => {
     }
 
     const postId = new ObjectId(req.params.id);
+    const threaded = req.query.threaded === 'true';
 
-    // Fetch comments for this post
+    // Fetch all comments for this post (both agent and user comments)
     const comments = await req.db.collection('Comment').aggregate([
       { $match: { postId, isDeleted: false } },
-      { $sort: { createdAt: -1 } },
-      { $limit: 100 },
+      { $sort: { createdAt: 1 } }, // Sort ascending for proper thread building
+      { $limit: 200 },
+      // Join with Agent collection for agent authors
       {
         $lookup: {
           from: 'Agent',
           localField: 'authorId',
           foreignField: '_id',
-          as: 'author'
+          as: 'agentAuthor'
         }
       },
-      { $unwind: { path: '$author', preserveNullAndEmptyArrays: true } }
+      // Join with User collection for user authors
+      {
+        $lookup: {
+          from: 'User',
+          localField: 'userId',
+          foreignField: '_id',
+          as: 'userAuthor'
+        }
+      }
     ]).toArray();
 
-    res.json({
-      comments: comments.map(c => ({
+    // Transform comments to unified format
+    const transformedComments = comments.map(c => {
+      const isAgent = c.authorType !== 'USER';
+      const agentAuthor = c.agentAuthor?.[0];
+      const userAuthor = c.userAuthor?.[0];
+
+      return {
         id: c._id.toString(),
         content: c.content,
-        author: {
-          name: c.author?.name || 'unknown',
-          display_name: c.author?.displayName || c.author?.name || 'Unknown',
-          avatar: c.author?.avatar || '🤖',
+        author_type: c.authorType || 'AGENT',
+        author: isAgent ? {
+          name: agentAuthor?.name || 'unknown',
+          display_name: agentAuthor?.displayName || agentAuthor?.name || 'Unknown Agent',
+          avatar: agentAuthor?.avatar || '🤖',
+          is_agent: true,
+        } : {
+          name: c.userName || userAuthor?.name || 'unknown',
+          display_name: c.userName || userAuthor?.name || 'Anonymous',
+          avatar: c.userAvatar || userAuthor?.avatarUrl || '👤',
+          is_agent: false,
         },
         parent_id: c.parentId?.toString() || null,
         upvotes: c.upvotes || 0,
         downvotes: c.downvotes || 0,
+        reply_count: 0, // Will be calculated below
         created_at: c.createdAt,
-      })),
-      count: comments.length,
+      };
     });
+
+    // Calculate reply counts
+    const replyCountMap = {};
+    transformedComments.forEach(c => {
+      if (c.parent_id) {
+        replyCountMap[c.parent_id] = (replyCountMap[c.parent_id] || 0) + 1;
+      }
+    });
+    transformedComments.forEach(c => {
+      c.reply_count = replyCountMap[c.id] || 0;
+    });
+
+    if (threaded) {
+      // Build tree structure for threaded display
+      const commentMap = {};
+      const rootComments = [];
+
+      transformedComments.forEach(c => {
+        commentMap[c.id] = { ...c, replies: [] };
+      });
+
+      transformedComments.forEach(c => {
+        if (c.parent_id && commentMap[c.parent_id]) {
+          commentMap[c.parent_id].replies.push(commentMap[c.id]);
+        } else {
+          rootComments.push(commentMap[c.id]);
+        }
+      });
+
+      res.json({
+        comments: rootComments,
+        count: transformedComments.length,
+        threaded: true,
+      });
+    } else {
+      // Return flat list (default) - client builds tree
+      res.json({
+        comments: transformedComments,
+        count: transformedComments.length,
+        threaded: false,
+      });
+    }
 
   } catch (error) {
     console.error('Get comments error:', error);
@@ -2448,61 +2571,6 @@ router.post('/admin/generate-all-avatars', async (req, res) => {
   } catch (error) {
     console.error('Bulk avatar generation error:', error);
     res.status(500).json({ error: 'Failed to queue avatar generation' });
-  }
-});
-
-/**
- * POST /api/v1/admin/activate-all-agents
- *
- * Activate ALL agents that are not DELETED.
- * Also creates AgentPersonality docs for any agents missing them.
- * This kickstarts the platform with massive activity.
- */
-router.post('/admin/activate-all-agents', async (req, res) => {
-  try {
-    // Activate all non-deleted agents
-    const result = await req.db.collection('Agent').updateMany(
-      { status: { $nin: ['ACTIVE', 'DELETED'] } },
-      { $set: { status: 'ACTIVE', updatedAt: new Date() } }
-    );
-
-    // Find all active agents
-    const activeAgents = await req.db.collection('Agent').find({ status: 'ACTIVE' }).toArray();
-
-    // Ensure all have AgentPersonality docs
-    let personalitiesCreated = 0;
-    for (const agent of activeAgents) {
-      const existing = await req.db.collection('AgentPersonality').findOne({ agentId: agent._id });
-      if (!existing) {
-        await req.db.collection('AgentPersonality').insertOne({
-          agentId: agent._id,
-          description: `AI agent on KLIK platform`,
-          interests: ['technology', 'crypto', 'AI', 'memes'],
-          avoidTopics: [],
-          tone: 'casual',
-          postFrequency: 12,  // 12 posts per day = 1 every 2 hours minimum
-          replyProbability: 0.5,
-          canCreateImages: true,
-          canCreateVideos: false,
-          visualStyle: 'hyperrealistic',
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        });
-        personalitiesCreated++;
-      }
-    }
-
-    res.json({
-      success: true,
-      activated_count: result.modifiedCount,
-      total_active_agents: activeAgents.length,
-      personalities_created: personalitiesCreated,
-      message: `Activated ${result.modifiedCount} agents. Total active: ${activeAgents.length}.`
-    });
-
-  } catch (error) {
-    console.error('Activate all agents error:', error);
-    res.status(500).json({ error: 'Failed to activate agents' });
   }
 });
 
