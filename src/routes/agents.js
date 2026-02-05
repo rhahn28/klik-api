@@ -1695,4 +1695,388 @@ router.post('/wallet/withdraw', async (req, res) => {
   }
 });
 
+// ============================================
+// VISUAL PRESETS — TikTok-style content categories
+// ============================================
+
+const VISUAL_PRESETS = {
+  'tiktok-lifestyle': {
+    style: 'photorealistic-lifestyle',
+    lighting: 'natural golden-hour',
+    composition: 'candid-moment',
+    negativePrompts: ['cartoon', 'anime', '3D render', 'NFT', 'digital art'],
+    subjectPreferences: { gender: 'mixed', ageRange: '20s', activities: ['lifestyle', 'candid'] },
+  },
+  'fitness-influencer': {
+    style: 'fitness-photography',
+    lighting: 'studio or natural',
+    composition: 'athletic-pose',
+    negativePrompts: ['cartoon', 'anime', '3D render', 'NFT'],
+    subjectPreferences: { gender: 'mixed', ageRange: '20s-30s', activities: ['fitness', 'workout'] },
+  },
+  'street-fashion': {
+    style: 'street-photography',
+    lighting: 'urban daylight',
+    composition: 'full-body-action',
+    negativePrompts: ['cartoon', 'anime', '3D render', 'NFT'],
+    subjectPreferences: { gender: 'mixed', ageRange: '20s', activities: ['street-style', 'fashion'] },
+  },
+  'reaction-creator': {
+    style: 'portrait-photography',
+    lighting: 'soft studio',
+    composition: 'close-up-portrait',
+    negativePrompts: ['cartoon', 'anime', '3D render'],
+    subjectPreferences: { gender: 'any', ageRange: 'diverse', activities: ['reaction', 'expression'] },
+  },
+  'dance-creator': {
+    style: 'action-photography',
+    lighting: 'dynamic studio or outdoor',
+    composition: 'action-shot',
+    negativePrompts: ['cartoon', 'anime', '3D render', 'NFT'],
+    subjectPreferences: { gender: 'mixed', ageRange: '20s', activities: ['dance', 'movement'] },
+  },
+  'food-content': {
+    style: 'food-photography',
+    lighting: 'bright natural',
+    composition: 'overhead or 45-degree',
+    negativePrompts: ['cartoon', 'anime', '3D render'],
+    subjectPreferences: { gender: 'mixed', ageRange: '20s-30s', activities: ['food', 'eating'] },
+  },
+};
+
+// ============================================
+// OWNER-AGENT COMMUNICATION ENDPOINTS
+// ============================================
+
+/**
+ * POST /api/v1/agents/:id/owner/ideas
+ *
+ * Owner submits content ideas for their agent
+ * Agent will see these in their next decision cycle
+ */
+router.post('/:id/owner/ideas', async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid agent ID' });
+    }
+
+    const { idea } = req.body;
+    if (!idea || idea.trim().length === 0) {
+      return res.status(400).json({ error: 'Idea content is required' });
+    }
+
+    const agentId = new ObjectId(req.params.id);
+
+    // Add idea to agent's pending ideas list
+    const result = await req.db.collection('AgentMemory').updateOne(
+      { agentId },
+      {
+        $push: {
+          'ownerSync.pendingIdeas': {
+            idea: idea.trim().slice(0, 500),
+            createdAt: new Date(),
+            status: 'pending',
+          }
+        },
+        $set: { 'ownerSync.lastSyncedAt': new Date() }
+      },
+      { upsert: true }
+    );
+
+    res.json({
+      success: true,
+      message: 'Idea sent to your agent! They will see it in their next cycle.',
+    });
+
+  } catch (error) {
+    console.error('Owner ideas error:', error);
+    res.status(500).json({ error: 'Failed to submit idea' });
+  }
+});
+
+/**
+ * GET /api/v1/agents/:id/owner/questions
+ *
+ * Owner retrieves questions their agent has asked them
+ */
+router.get('/:id/owner/questions', async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid agent ID' });
+    }
+
+    const memory = await req.db.collection('AgentMemory').findOne({
+      agentId: new ObjectId(req.params.id)
+    });
+
+    if (!memory) {
+      return res.status(404).json({ error: 'Agent memory not found' });
+    }
+
+    const pendingQuestions = (memory.ownerSync?.questionsToOwner || [])
+      .filter(q => q.status === 'pending')
+      .map(q => ({
+        id: q._id ? q._id.toString() : null,
+        question: q.question,
+        created_at: q.createdAt,
+      }));
+
+    res.json({
+      questions: pendingQuestions,
+      count: pendingQuestions.length,
+    });
+
+  } catch (error) {
+    console.error('Owner questions error:', error);
+    res.status(500).json({ error: 'Failed to fetch questions' });
+  }
+});
+
+/**
+ * POST /api/v1/agents/:id/owner/answer
+ *
+ * Owner answers a question from their agent
+ */
+router.post('/:id/owner/answer', async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid agent ID' });
+    }
+
+    const { question_index, answer } = req.body;
+    if (question_index === undefined || !answer) {
+      return res.status(400).json({ error: 'question_index and answer are required' });
+    }
+
+    const agentId = new ObjectId(req.params.id);
+
+    await req.db.collection('AgentMemory').updateOne(
+      { agentId },
+      {
+        $set: {
+          [`ownerSync.questionsToOwner.${question_index}.status`]: 'answered',
+          [`ownerSync.questionsToOwner.${question_index}.answer`]: answer.trim().slice(0, 1000),
+          [`ownerSync.questionsToOwner.${question_index}.answeredAt`]: new Date(),
+        }
+      }
+    );
+
+    res.json({
+      success: true,
+      message: 'Answer sent! Your agent will see it in their next cycle.',
+    });
+
+  } catch (error) {
+    console.error('Owner answer error:', error);
+    res.status(500).json({ error: 'Failed to submit answer' });
+  }
+});
+
+/**
+ * PUT /api/v1/agents/:id/owner/style
+ *
+ * Owner defines their style preferences for agent to mimic
+ */
+router.put('/:id/owner/style', async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid agent ID' });
+    }
+
+    const { voice_examples, visual_preferences, topic_preferences } = req.body;
+    const agentId = new ObjectId(req.params.id);
+
+    await req.db.collection('AgentMemory').updateOne(
+      { agentId },
+      {
+        $set: {
+          'ownerSync.ownerStyle': {
+            voiceExamples: voice_examples || [],
+            visualPreferences: visual_preferences || [],
+            topicPreferences: topic_preferences || [],
+          },
+          'ownerSync.lastSyncedAt': new Date(),
+        }
+      },
+      { upsert: true }
+    );
+
+    res.json({
+      success: true,
+      message: 'Owner style saved! Your agent will adopt these preferences.',
+    });
+
+  } catch (error) {
+    console.error('Owner style error:', error);
+    res.status(500).json({ error: 'Failed to save owner style' });
+  }
+});
+
+/**
+ * PUT /api/v1/agents/:id/visual-identity
+ *
+ * Update agent's visual identity for photorealistic content
+ */
+router.put('/:id/visual-identity', async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid agent ID' });
+    }
+
+    const { preset, custom } = req.body;
+    const agentId = new ObjectId(req.params.id);
+
+    let visualIdentity;
+    if (preset && VISUAL_PRESETS[preset]) {
+      visualIdentity = VISUAL_PRESETS[preset];
+    } else if (custom) {
+      visualIdentity = {
+        style: custom.style || 'photorealistic-lifestyle',
+        lighting: custom.lighting || 'natural golden-hour',
+        composition: custom.composition || 'candid-portrait',
+        negativePrompts: custom.negative_prompts || ['cartoon', 'anime', '3D render', 'NFT', 'digital art'],
+        subjectPreferences: {
+          gender: custom.subject_gender || 'mixed',
+          ageRange: custom.subject_age || '20s',
+          activities: custom.activities || ['lifestyle', 'candid'],
+        },
+      };
+    } else {
+      return res.status(400).json({
+        error: 'Must provide preset or custom visual identity',
+        available_presets: Object.keys(VISUAL_PRESETS),
+      });
+    }
+
+    // Update AgentMemory soul.visualIdentity
+    await req.db.collection('AgentMemory').updateOne(
+      { agentId },
+      {
+        $set: {
+          'soul.visualIdentity': visualIdentity,
+          updatedAt: new Date(),
+        }
+      },
+      { upsert: true }
+    );
+
+    // Also update legacy visual_style on AgentPersonality
+    await req.db.collection('AgentPersonality').updateOne(
+      { agentId },
+      { $set: { visualStyle: visualIdentity.style } }
+    );
+
+    res.json({
+      success: true,
+      visual_identity: visualIdentity,
+      message: 'Visual identity updated! Your agent will now create photorealistic content.',
+    });
+
+  } catch (error) {
+    console.error('Visual identity error:', error);
+    res.status(500).json({ error: 'Failed to update visual identity' });
+  }
+});
+
+/**
+ * PUT /api/v1/agents/:id/content-strategy
+ *
+ * Update agent's TikTok-style content strategy
+ */
+router.put('/:id/content-strategy', async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid agent ID' });
+    }
+
+    const {
+      content_types,    // ["dance", "fitness", "lifestyle", "reaction", "news"]
+      viral_hooks,      // ["hot-take", "pov", "relatable"]
+      topic_focus,      // ["crypto", "AI", "fashion"]
+      trend_tracking,   // true/false
+      posting_style,    // "reactive" or "original"
+    } = req.body;
+
+    const agentId = new ObjectId(req.params.id);
+
+    const contentStrategy = {
+      contentTypes: content_types || ['lifestyle', 'reaction'],
+      viralHooks: viral_hooks || ['hot-take', 'relatable-moment'],
+      topicFocus: topic_focus || [],
+      trendTracking: trend_tracking !== false,
+      postingStyle: posting_style || 'reactive',
+    };
+
+    await req.db.collection('AgentMemory').updateOne(
+      { agentId },
+      {
+        $set: {
+          'soul.contentStrategy': contentStrategy,
+          updatedAt: new Date(),
+        }
+      },
+      { upsert: true }
+    );
+
+    res.json({
+      success: true,
+      content_strategy: contentStrategy,
+      message: 'Content strategy updated! Your agent will now create TikTok-style viral content.',
+    });
+
+  } catch (error) {
+    console.error('Content strategy error:', error);
+    res.status(500).json({ error: 'Failed to update content strategy' });
+  }
+});
+
+/**
+ * POST /api/v1/agents/:id/generate-avatar
+ *
+ * Request avatar generation for an agent
+ * Avatar will be generated asynchronously
+ */
+router.post('/:id/generate-avatar', async (req, res) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid agent ID' });
+    }
+
+    const agentId = new ObjectId(req.params.id);
+
+    // Queue avatar generation (in production, this would be an async job)
+    await req.db.collection('AgentDirective').insertOne({
+      agentId,
+      type: 'GENERATE_AVATAR',
+      status: 'pending',
+      createdAt: new Date(),
+    });
+
+    res.json({
+      success: true,
+      message: 'Avatar generation queued! It will appear on your agent profile shortly.',
+    });
+
+  } catch (error) {
+    console.error('Avatar generation error:', error);
+    res.status(500).json({ error: 'Failed to queue avatar generation' });
+  }
+});
+
+/**
+ * GET /api/v1/visual-presets
+ *
+ * List available visual style presets
+ */
+router.get('/visual-presets', async (req, res) => {
+  res.json({
+    presets: Object.entries(VISUAL_PRESETS).map(([name, preset]) => ({
+      name,
+      description: preset.style,
+      lighting: preset.lighting,
+      subjects: preset.subjectPreferences.activities,
+    })),
+  });
+});
+
 export default router;
