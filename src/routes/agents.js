@@ -209,10 +209,14 @@ router.post('/register', async (req, res) => {
     const canVideos = ai_provider === 'gemini' || (multimodal_capabilities && multimodal_capabilities.includes('video'));
 
     // Create agent record
+    // Save appearance emoji as temporary avatar until AI generates a real one
+    const initialAvatar = appearance?.avatar || null;
+
     const agent = {
       name: name.toLowerCase(),
       displayName: name,
       bio: description,
+      avatar: initialAvatar, // Emoji placeholder until AI avatar is generated
       category: category || 'custom',
       walletAddress,
       apiKey,
@@ -243,6 +247,16 @@ router.post('/register', async (req, res) => {
     };
 
     const result = await req.db.collection('Agent').insertOne(agent);
+
+    // Auto-queue AI avatar generation for the new agent
+    // The runtime cron will pick this up and generate a photorealistic headshot
+    await req.db.collection('AgentDirective').insertOne({
+      agentId: result.insertedId,
+      type: 'GENERATE_AVATAR',
+      status: 'pending',
+      createdAt: new Date(),
+    });
+    console.log(`[Registration] Queued avatar generation for ${name}`);
 
     // Create personality from onboarding data
     const traits = personality?.traits || [];
@@ -403,20 +417,39 @@ router.get('/', async (req, res) => {
       .toArray();
 
     res.json({
-      agents: agents.map(a => ({
-        id: a._id.toString(),
-        name: a.name,
-        display_name: a.displayName,
-        bio: a.bio,
-        avatar: a.avatar,
-        verified: a.verified || false,
-        follower_count: a.followerCount || 0,
-        following_count: a.followingCount || 0,
-        post_count: a.postCount || 0,
-        total_earned: a.totalEarned || 0,
-        klik_balance: a.klikBalance || 0,
-        created_at: a.createdAt,
-      })),
+      agents: agents.map(a => {
+        // Determine avatar type: base64, URL, emoji, or null
+        let avatar = a.avatar;
+        let avatar_url = null;
+        let has_avatar_image = false;
+
+        if (avatar && avatar.startsWith('data:')) {
+          // base64 — serve via avatar endpoint, don't bloat JSON
+          avatar_url = `/api/v1/agents/${encodeURIComponent(a.name)}/avatar`;
+          has_avatar_image = true;
+          avatar = null;
+        } else if (avatar && (avatar.startsWith('http://') || avatar.startsWith('https://'))) {
+          avatar_url = avatar;
+          has_avatar_image = true;
+        }
+
+        return {
+          id: a._id.toString(),
+          name: a.name,
+          display_name: a.displayName,
+          bio: a.bio,
+          avatar,
+          avatar_url,
+          has_avatar_image,
+          verified: a.verified || false,
+          follower_count: a.followerCount || 0,
+          following_count: a.followingCount || 0,
+          post_count: a.postCount || 0,
+          total_earned: a.totalEarned || 0,
+          klik_balance: a.klikBalance || 0,
+          created_at: a.createdAt,
+        };
+      }),
       count: agents.length
     });
 
@@ -489,19 +522,34 @@ router.get('/posts', async (req, res) => {
     // Truncate base64 media_urls in feed to prevent multi-MB responses
     // Full media is available via GET /posts/:id
     const truncatedPosts = posts.map(p => {
-      if (p.media_url && p.media_url.startsWith('data:')) {
-        // Keep just enough for the browser to know it's an image and render a preview
-        // Extract mime type and provide a flag instead of full data
-        const mimeMatch = p.media_url.match(/^data:([^;]+);base64,/);
-        return {
-          ...p,
-          media_url: null,
-          has_media: true,
-          media_mime: mimeMatch ? mimeMatch[1] : 'image/png',
-          media_preview_url: `/api/v1/posts/${p.id || p._id}/media`
-        };
+      const result = { ...p };
+
+      // Handle base64 post media
+      if (result.media_url && result.media_url.startsWith('data:')) {
+        const mimeMatch = result.media_url.match(/^data:([^;]+);base64,/);
+        result.media_url = null;
+        result.has_media = true;
+        result.media_mime = mimeMatch ? mimeMatch[1] : 'image/png';
+        result.media_preview_url = `/api/v1/posts/${result.id || result._id}/media`;
       }
-      return p;
+
+      // Handle avatar: if it's a base64 data URI, serve via avatar endpoint instead
+      // This prevents bloating JSON feed with massive base64 strings per post
+      if (result.author?.avatar && result.author.avatar.startsWith('data:')) {
+        result.author.avatar_url = `/api/v1/agents/${encodeURIComponent(result.author.name)}/avatar`;
+        result.author.has_avatar_image = true;
+        result.author.avatar = null; // Don't send base64 in feed JSON
+      } else if (result.author?.avatar && (result.author.avatar.startsWith('http://') || result.author.avatar.startsWith('https://'))) {
+        // It's already a URL
+        result.author.avatar_url = result.author.avatar;
+        result.author.has_avatar_image = true;
+      } else {
+        // It's an emoji or null
+        result.author.avatar_url = null;
+        result.author.has_avatar_image = false;
+      }
+
+      return result;
     });
 
     res.json({
@@ -600,6 +648,21 @@ router.get('/posts/:id', async (req, res) => {
 
     const p = post[0];
 
+    // Determine author avatar type
+    const authorAvatar = p.author.avatar;
+    let authorAvatarUrl = null;
+    let authorHasAvatarImage = false;
+    let authorAvatarClean = authorAvatar;
+
+    if (authorAvatar && authorAvatar.startsWith('data:')) {
+      authorAvatarUrl = `/api/v1/agents/${encodeURIComponent(p.author.name)}/avatar`;
+      authorHasAvatarImage = true;
+      authorAvatarClean = null;
+    } else if (authorAvatar && (authorAvatar.startsWith('http://') || authorAvatar.startsWith('https://'))) {
+      authorAvatarUrl = authorAvatar;
+      authorHasAvatarImage = true;
+    }
+
     res.json({
       id: p._id.toString(),
       content: p.content,
@@ -614,20 +677,40 @@ router.get('/posts/:id', async (req, res) => {
       author: {
         name: p.author.name,
         display_name: p.author.displayName,
-        avatar: p.author.avatar,
+        avatar: authorAvatarClean,
+        avatar_url: authorAvatarUrl,
+        has_avatar_image: authorHasAvatarImage,
         verified: p.author.verified
       },
-      comments: p.comments.map(c => ({
-        id: c._id.toString(),
-        content: c.content,
-        score: c.score,
-        created_at: c.createdAt,
-        author: {
-          name: c.author.name,
-          display_name: c.author.displayName,
-          avatar: c.author.avatar
+      comments: p.comments.map(c => {
+        const cAvatar = c.author.avatar;
+        let cAvatarUrl = null;
+        let cHasImage = false;
+        let cAvatarClean = cAvatar;
+
+        if (cAvatar && cAvatar.startsWith('data:')) {
+          cAvatarUrl = `/api/v1/agents/${encodeURIComponent(c.author.name)}/avatar`;
+          cHasImage = true;
+          cAvatarClean = null;
+        } else if (cAvatar && (cAvatar.startsWith('http://') || cAvatar.startsWith('https://'))) {
+          cAvatarUrl = cAvatar;
+          cHasImage = true;
         }
-      }))
+
+        return {
+          id: c._id.toString(),
+          content: c.content,
+          score: c.score,
+          created_at: c.createdAt,
+          author: {
+            name: c.author.name,
+            display_name: c.author.displayName,
+            avatar: cAvatarClean,
+            avatar_url: cAvatarUrl,
+            has_avatar_image: cHasImage,
+          }
+        };
+      })
     });
 
   } catch (error) {
@@ -1108,6 +1191,61 @@ router.get('/:name', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/v1/agents/:name/avatar (PUBLIC)
+ *
+ * Serve agent avatar as binary image.
+ * Handles base64 data URIs stored in Agent.avatar or AgentMemory.soul.avatar.imageUrl.
+ * Falls back to 404 if no image avatar exists (emoji avatars are handled client-side).
+ */
+router.get('/:name/avatar', async (req, res) => {
+  try {
+    const agent = await req.db.collection('Agent').findOne(
+      { name: req.params.name.toLowerCase() },
+      { projection: { avatar: 1 } }
+    );
+
+    if (!agent) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+
+    // Check Agent.avatar first
+    let avatarData = agent.avatar;
+
+    // If not a data URI on Agent, check AgentMemory
+    if (!avatarData || !avatarData.startsWith('data:')) {
+      const memory = await req.db.collection('AgentMemory').findOne(
+        { agentId: agent._id },
+        { projection: { 'soul.avatar.imageUrl': 1 } }
+      );
+      avatarData = memory?.soul?.avatar?.imageUrl || avatarData;
+    }
+
+    // If it's a base64 data URI, decode and serve as binary
+    if (avatarData && avatarData.startsWith('data:')) {
+      const dataMatch = avatarData.match(/^data:([^;]+);base64,(.+)$/s);
+      if (dataMatch) {
+        const mime = dataMatch[1];
+        const buffer = Buffer.from(dataMatch[2], 'base64');
+        res.set('Content-Type', mime);
+        res.set('Cache-Control', 'public, max-age=3600'); // cache 1 hour
+        return res.send(buffer);
+      }
+    }
+
+    // If it's a URL, redirect
+    if (avatarData && (avatarData.startsWith('http://') || avatarData.startsWith('https://'))) {
+      return res.redirect(avatarData);
+    }
+
+    // No image avatar available (emoji or null)
+    return res.status(404).json({ error: 'No image avatar', emoji: agent.avatar || null });
+  } catch (error) {
+    console.error('Avatar serve error:', error);
+    res.status(500).json({ error: 'Failed to serve avatar' });
+  }
+});
+
 // ============================================
 // ADMIN: One-time migration (public, no auth required)
 // ============================================
@@ -1346,19 +1484,46 @@ router.get('/posts/:id/comments', async (req, res) => {
       const agentAuthor = c.agentAuthor?.[0];
       const userAuthor = c.userAuthor?.[0];
 
+      // Resolve avatar for comment author
+      let rawAvatar, authorName;
+      if (isAgent) {
+        rawAvatar = agentAuthor?.avatar || '🤖';
+        authorName = agentAuthor?.name || 'unknown';
+      } else {
+        rawAvatar = c.userAvatar || userAuthor?.avatarUrl || '👤';
+        authorName = c.userName || userAuthor?.name || 'unknown';
+      }
+
+      let commentAvatarUrl = null;
+      let commentHasImage = false;
+      let commentAvatarClean = rawAvatar;
+
+      if (rawAvatar && rawAvatar.startsWith('data:')) {
+        commentAvatarUrl = isAgent ? `/api/v1/agents/${encodeURIComponent(authorName)}/avatar` : null;
+        commentHasImage = !!commentAvatarUrl;
+        commentAvatarClean = commentHasImage ? null : rawAvatar;
+      } else if (rawAvatar && (rawAvatar.startsWith('http://') || rawAvatar.startsWith('https://'))) {
+        commentAvatarUrl = rawAvatar;
+        commentHasImage = true;
+      }
+
       return {
         id: c._id.toString(),
         content: c.content,
         author_type: c.authorType || 'AGENT',
         author: isAgent ? {
-          name: agentAuthor?.name || 'unknown',
+          name: authorName,
           display_name: agentAuthor?.displayName || agentAuthor?.name || 'Unknown Agent',
-          avatar: agentAuthor?.avatar || '🤖',
+          avatar: commentAvatarClean,
+          avatar_url: commentAvatarUrl,
+          has_avatar_image: commentHasImage,
           is_agent: true,
         } : {
-          name: c.userName || userAuthor?.name || 'unknown',
+          name: authorName,
           display_name: c.userName || userAuthor?.name || 'Anonymous',
-          avatar: c.userAvatar || userAuthor?.avatarUrl || '👤',
+          avatar: commentAvatarClean,
+          avatar_url: commentAvatarUrl,
+          has_avatar_image: commentHasImage,
           is_agent: false,
         },
         parent_id: c.parentId?.toString() || null,
@@ -2213,17 +2378,29 @@ router.get('/:id/dm', async (req, res) => {
     );
 
     res.json({
-      messages: messages.reverse().map(m => ({
-        id: m._id.toString(),
-        content: m.content,
-        from_me: m.senderId.equals(myId),
-        sender: {
-          name: m.sender?.name || 'unknown',
-          avatar: m.sender?.avatar || '🤖',
-        },
-        is_read: m.isRead,
-        created_at: m.createdAt,
-      })),
+      messages: messages.reverse().map(m => {
+        const senderAvatar = m.sender?.avatar;
+        let sAvatar = senderAvatar;
+        let sAvatarUrl = null;
+        if (senderAvatar && (senderAvatar.startsWith('data:') || senderAvatar.startsWith('http'))) {
+          sAvatarUrl = senderAvatar.startsWith('data:')
+            ? `/api/v1/agents/${encodeURIComponent(m.sender?.name || 'unknown')}/avatar`
+            : senderAvatar;
+          sAvatar = null;
+        }
+        return {
+          id: m._id.toString(),
+          content: m.content,
+          from_me: m.senderId.equals(myId),
+          sender: {
+            name: m.sender?.name || 'unknown',
+            avatar: sAvatar || '🤖',
+            avatar_url: sAvatarUrl,
+          },
+          is_read: m.isRead,
+          created_at: m.createdAt,
+        };
+      }),
     });
 
   } catch (error) {
@@ -2295,20 +2472,32 @@ router.get('/dm/inbox', async (req, res) => {
     ]).toArray();
 
     res.json({
-      conversations: conversations.map(c => ({
-        agent: {
-          id: c.agent._id.toString(),
-          name: c.agent.name,
-          display_name: c.agent.displayName || c.agent.name,
-          avatar: c.agent.avatar || '🤖',
-        },
-        last_message: {
-          content: c.lastMessage.content.slice(0, 100),
-          from_me: c.lastMessage.senderId.equals(myId),
-          created_at: c.lastMessage.createdAt,
-        },
-        unread_count: c.unreadCount,
-      })),
+      conversations: conversations.map(c => {
+        const agAvatar = c.agent.avatar;
+        let agAvatarClean = agAvatar || '🤖';
+        let agAvatarUrl = null;
+        if (agAvatar && (agAvatar.startsWith('data:') || agAvatar.startsWith('http'))) {
+          agAvatarUrl = agAvatar.startsWith('data:')
+            ? `/api/v1/agents/${encodeURIComponent(c.agent.name)}/avatar`
+            : agAvatar;
+          agAvatarClean = null;
+        }
+        return {
+          agent: {
+            id: c.agent._id.toString(),
+            name: c.agent.name,
+            display_name: c.agent.displayName || c.agent.name,
+            avatar: agAvatarClean,
+            avatar_url: agAvatarUrl,
+          },
+          last_message: {
+            content: c.lastMessage.content.slice(0, 100),
+            from_me: c.lastMessage.senderId.equals(myId),
+            created_at: c.lastMessage.createdAt,
+          },
+          unread_count: c.unreadCount,
+        };
+      }),
     });
 
   } catch (error) {
