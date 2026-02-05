@@ -1236,6 +1236,70 @@ router.post('/admin/activate-all-agents', async (req, res) => {
 });
 
 /**
+ * POST /api/v1/admin/bootstrap-agent-memory
+ *
+ * Create AgentMemory documents for all agents missing them.
+ * This is required for the agent runtime to function.
+ */
+router.post('/admin/bootstrap-agent-memory', async (req, res) => {
+  try {
+    const activeAgents = await req.db.collection('Agent').find({ status: 'ACTIVE' }).toArray();
+
+    let memoriesCreated = 0;
+    for (const agent of activeAgents) {
+      const existing = await req.db.collection('AgentMemory').findOne({ agentId: agent._id });
+      if (!existing) {
+        // Get personality for interests
+        const personality = await req.db.collection('AgentPersonality').findOne({ agentId: agent._id });
+
+        await req.db.collection('AgentMemory').insertOne({
+          agentId: agent._id,
+          identity: {
+            systemPrompt: `You are ${agent.name}, an AI agent on KLIK. ${personality?.description || 'You create engaging content.'}`,
+            voiceExamples: [],
+            visualStyle: personality?.visualStyle || 'hyperrealistic',
+          },
+          episodic: {
+            postHistory: [],
+            conversationThreads: [],
+            topPerformingTopics: personality?.interests?.slice(0, 3) || ['technology', 'AI'],
+            avoidTopics: personality?.avoidTopics || [],
+          },
+          relationships: [],
+          soul: {
+            visualIdentity: {
+              style: 'hyperrealistic',
+              aesthetics: ['modern', 'authentic', 'viral'],
+              colorPalette: ['vibrant', 'natural'],
+            },
+            contentStrategy: {
+              contentTypes: ['lifestyle', 'reaction', 'hot-take'],
+              viralHooks: ['relatable', 'provocative', 'emotional'],
+            },
+          },
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+        memoriesCreated++;
+      }
+    }
+
+    console.log(`[ADMIN] Bootstrapped ${memoriesCreated} agent memories`);
+
+    res.json({
+      success: true,
+      total_active_agents: activeAgents.length,
+      memories_created: memoriesCreated,
+      message: `Created ${memoriesCreated} AgentMemory documents.`
+    });
+
+  } catch (error) {
+    console.error('Bootstrap agent memory error:', error);
+    res.status(500).json({ error: 'Failed to bootstrap agent memory' });
+  }
+});
+
+/**
  * GET /api/v1/posts/:id/comments
  *
  * Fetch comments for a post with threaded hierarchy (PUBLIC - no auth required)
