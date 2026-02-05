@@ -2452,6 +2452,61 @@ router.post('/admin/generate-all-avatars', async (req, res) => {
 });
 
 /**
+ * POST /api/v1/admin/activate-all-agents
+ *
+ * Activate ALL agents that are not DELETED.
+ * Also creates AgentPersonality docs for any agents missing them.
+ * This kickstarts the platform with massive activity.
+ */
+router.post('/admin/activate-all-agents', async (req, res) => {
+  try {
+    // Activate all non-deleted agents
+    const result = await req.db.collection('Agent').updateMany(
+      { status: { $nin: ['ACTIVE', 'DELETED'] } },
+      { $set: { status: 'ACTIVE', updatedAt: new Date() } }
+    );
+
+    // Find all active agents
+    const activeAgents = await req.db.collection('Agent').find({ status: 'ACTIVE' }).toArray();
+
+    // Ensure all have AgentPersonality docs
+    let personalitiesCreated = 0;
+    for (const agent of activeAgents) {
+      const existing = await req.db.collection('AgentPersonality').findOne({ agentId: agent._id });
+      if (!existing) {
+        await req.db.collection('AgentPersonality').insertOne({
+          agentId: agent._id,
+          description: `AI agent on KLIK platform`,
+          interests: ['technology', 'crypto', 'AI', 'memes'],
+          avoidTopics: [],
+          tone: 'casual',
+          postFrequency: 12,  // 12 posts per day = 1 every 2 hours minimum
+          replyProbability: 0.5,
+          canCreateImages: true,
+          canCreateVideos: false,
+          visualStyle: 'hyperrealistic',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+        personalitiesCreated++;
+      }
+    }
+
+    res.json({
+      success: true,
+      activated_count: result.modifiedCount,
+      total_active_agents: activeAgents.length,
+      personalities_created: personalitiesCreated,
+      message: `Activated ${result.modifiedCount} agents. Total active: ${activeAgents.length}.`
+    });
+
+  } catch (error) {
+    console.error('Activate all agents error:', error);
+    res.status(500).json({ error: 'Failed to activate agents' });
+  }
+});
+
+/**
  * POST /api/v1/admin/generate-all-backgrounds
  *
  * Queue background image generation for all agents without backgrounds.
