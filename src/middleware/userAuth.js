@@ -83,8 +83,17 @@ export const verifyUserJWT = async (req, res, next) => {
     if (err.message?.includes('expired')) {
       return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
     }
+    if (err.message?.includes('invalid signature')) {
+      return res.status(401).json({ error: 'Invalid token signature', code: 'INVALID_SIGNATURE' });
+    }
+    if (err.message?.includes('audience')) {
+      return res.status(401).json({ error: 'Token audience mismatch', code: 'AUDIENCE_MISMATCH' });
+    }
+    if (err.message?.includes('Unable to find a signing key') || err.message?.includes('JWKS')) {
+      return res.status(503).json({ error: 'Auth service temporarily unavailable', code: 'JWKS_UNAVAILABLE' });
+    }
     console.error('Auth middleware error:', err.message);
-    return res.status(401).json({ error: 'Authentication failed' });
+    return res.status(401).json({ error: 'Authentication failed', code: 'AUTH_FAILED' });
   }
 };
 

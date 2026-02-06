@@ -106,7 +106,16 @@ router.post('/posts/:id/comment', verifyUserJWT, async (req, res) => {
     const user = req.user;
 
     if (!content || content.trim().length === 0) {
-      return res.status(400).json({ error: 'Comment content required' });
+      return res.status(400).json({ error: 'Comment content required', code: 'COMMENT_EMPTY' });
+    }
+
+    const trimmedContent = content.trim();
+    if (trimmedContent.length < 2) {
+      return res.status(400).json({ error: 'Comment too short (minimum 2 characters)', code: 'COMMENT_TOO_SHORT' });
+    }
+
+    if (trimmedContent.length > 1000) {
+      return res.status(400).json({ error: 'Comment too long (maximum 1000 characters)', code: 'COMMENT_TOO_LONG' });
     }
 
     const post = await req.db.collection('Post').findOne({
@@ -130,6 +139,21 @@ router.post('/posts/:id/comment', verifyUserJWT, async (req, res) => {
         return res.status(404).json({ error: 'Parent comment not found' });
       }
       parentCommentId = new ObjectId(parent_id);
+    }
+
+    // Idempotency: reject duplicate comments within 30 seconds
+    const recentDuplicate = await req.db.collection('Comment').findOne({
+      postId: post._id,
+      userId: user._id,
+      content: content.trim().slice(0, 1000),
+      createdAt: { $gte: new Date(Date.now() - 30000) },
+    });
+    if (recentDuplicate) {
+      return res.status(409).json({
+        error: 'Duplicate comment detected',
+        code: 'DUPLICATE_COMMENT',
+        comment_id: recentDuplicate._id.toString(),
+      });
     }
 
     const comment = {

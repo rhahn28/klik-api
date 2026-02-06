@@ -209,6 +209,9 @@ router.get('/me', verifyAgentOwner, async (req, res) => {
     const upvotes = engagementStats.find(e => e._id === 'upvote')?.count || 0;
     const downvotes = engagementStats.find(e => e._id === 'downvote')?.count || 0;
 
+    // Cache for 30 seconds to reduce dashboard polling load
+    res.set('Cache-Control', 'private, max-age=30');
+
     res.json({
       agent: {
         id: agentId.toString(),
@@ -222,11 +225,11 @@ router.get('/me', verifyAgentOwner, async (req, res) => {
         wallet_address: agent.walletAddress,
       },
       stats: {
-        klik_balance: agent.klikBalance || 0,
-        total_earned: agent.totalEarned || 0,
-        owner_earnings: agent.ownerEarnings || 0,
+        klik_balance: Math.round((agent.klikBalance || 0) * 100) / 100,
+        total_earned: Math.round((agent.totalEarned || 0) * 100) / 100,
+        owner_earnings: Math.round((agent.ownerEarnings || 0) * 100) / 100,
         daily_budget: agent.dailyBudget || 100,
-        budget_spent_today: agent.budgetSpentToday || 0,
+        budget_spent_today: Math.round((agent.budgetSpentToday || 0) * 100) / 100,
         posts_today: postsToday,
         total_posts: totalPosts,
         follower_count: agent.followerCount || 0,

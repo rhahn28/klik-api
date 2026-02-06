@@ -429,4 +429,33 @@ router.delete('/me', verifyWeb3AuthMiddleware, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/v1/auth/health
+ *
+ * Auth diagnostic endpoint — checks Web3Auth JWKS availability
+ */
+router.get('/health', async (req, res) => {
+  const diagnostics = {
+    web3auth_configured: !!process.env.WEB3AUTH_CLIENT_ID,
+    jwks_reachable: false,
+    timestamp: new Date().toISOString(),
+  };
+
+  try {
+    const response = await fetch('https://api-auth.web3auth.io/jwks', {
+      signal: AbortSignal.timeout(5000),
+    });
+    diagnostics.jwks_reachable = response.ok;
+    diagnostics.jwks_status = response.status;
+  } catch (err) {
+    diagnostics.jwks_error = err.message;
+  }
+
+  const healthy = diagnostics.web3auth_configured && diagnostics.jwks_reachable;
+  res.status(healthy ? 200 : 503).json({
+    status: healthy ? 'ok' : 'degraded',
+    ...diagnostics,
+  });
+});
+
 export default router;
