@@ -26,7 +26,12 @@ import billingRoutes from './routes/billing.js';
 import userAgentsRoutes from './routes/userAgents.js';
 import withdrawRoutes from './routes/withdraw.js';
 import userPostsRoutes from './routes/userPosts.js';
+import claimRoutes from './routes/claim.js';
+import orphanRoutes from './routes/orphans.js';
+import adminClaimStatsRoutes from './routes/admin/claimStats.js';
 import { startPriceRefresh, getKlikPrice } from './services/priceFeed.js';
+import { startOrphanCron } from './crons/orphanTransition.js';
+import { processNotifications } from './crons/claimNotifications.js';
 
 const app = express();
 const httpServer = createServer(app);
@@ -105,6 +110,30 @@ async function connectDatabases() {
       await db.collection('Post').createIndex({ content: 'text' });
       await db.collection('agent_droplets').createIndex({ status: 1 });
       await db.collection('agent_droplets').createIndex({ tailscale_ip: 1 }, { unique: true });
+
+      // Wallet agent indexes (OpenClaw claim system)
+      await db.collection('Agent').createIndex(
+        { 'walletAgentData.sourceWallet': 1 },
+        { sparse: true, unique: true }
+      );
+      await db.collection('Agent').createIndex({
+        isWalletAgent: 1,
+        'walletAgentData.claimStatus': 1,
+      });
+      await db.collection('Agent').createIndex({
+        isWalletAgent: 1,
+        'walletAgentData.claimDeadline': 1,
+        'walletAgentData.claimStatus': 1,
+      });
+      await db.collection('wallet_agent_notifications').createIndex({
+        agentId: 1,
+        template: 1,
+        status: 1,
+      });
+      await db.collection('wallet_agent_claims').createIndex({
+        walletAddress: 1,
+        event: 1,
+      });
     } catch (error) {
       console.error('MongoDB connection error:', error.message);
       console.log('Server will start without MongoDB - some features will be unavailable');
@@ -163,8 +192,8 @@ app.use((req, res, next) => {
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
-    version: '2.1.0-comments-fix',  // Version to track deployments
-    deployed_at: '2026-02-05T08:15:00Z',
+    version: '2.2.0-openclaw',  // Version to track deployments
+    deployed_at: '2026-02-06T20:00:00Z',
     timestamp: new Date().toISOString(),
     mongodb: db ? 'connected' : 'disconnected',
     redis: redisClient?.isReady ? 'connected' : 'disconnected'
@@ -183,6 +212,9 @@ app.get('/api', (req, res) => {
       search: '/api/v1/search',
       dashboard: '/api/v1/dashboard (API key auth)',
       internal: '/api/internal (admin token — droplet management)',
+      claim: '/api/v1/claim (OpenClaw wallet agent claiming)',
+      orphans: '/api/v1/orphans (orphaned agent adoption)',
+      adminClaims: '/api/v1/admin/claims (admin claim stats — admin token)',
     }
   });
 });
@@ -211,6 +243,15 @@ app.use('/api/v1/user', withdrawRoutes);
 
 // User posts routes (create posts, comments, tips as human user)
 app.use('/api/v1/user', userPostsRoutes);
+
+// OpenClaw claim routes (wallet agent claiming, opt-out, stats)
+app.use('/api/v1/claim', claimRoutes);
+
+// OpenClaw orphan routes (orphaned agent listing, adoption, watchlist)
+app.use('/api/v1/orphans', orphanRoutes);
+
+// OpenClaw admin claim stats (admin token required)
+app.use('/api/v1/admin/claims', adminClaimStatsRoutes);
 
 // KLIK price endpoint (public)
 app.get('/api/v1/price/klik', async (req, res) => {
@@ -288,6 +329,29 @@ async function start() {
   // Start price feed refresh (after Redis is connected)
   if (redisClient) {
     startPriceRefresh(redisClient);
+  }
+
+  // Start orphan transition cron (hourly check for expired unclaimed agents)
+  if (db) {
+    startOrphanCron(db, redisClient);
+  }
+
+  // Start claim notification cron (hourly reminder memos to unclaimed wallet agents)
+  if (db) {
+    const NOTIFICATION_INTERVAL = 60 * 60 * 1000; // 1 hour
+    console.log('[NotificationCron] Starting claim notification cron (interval: 3600s)');
+    // Run once on startup (delay 30s to let other services stabilize)
+    setTimeout(() => {
+      processNotifications(db, redisClient).catch(err => {
+        console.error('[NotificationCron] Initial run failed:', err.message);
+      });
+    }, 30_000);
+    // Then run hourly
+    setInterval(() => {
+      processNotifications(db, redisClient).catch(err => {
+        console.error('[NotificationCron] Scheduled run failed:', err.message);
+      });
+    }, NOTIFICATION_INTERVAL);
   }
 
   httpServer.listen(PORT, () => {
