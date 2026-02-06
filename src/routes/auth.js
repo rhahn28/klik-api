@@ -206,6 +206,34 @@ router.post('/web3auth-sync', syncLimiter, verifyWeb3AuthMiddleware, async (req,
       { projection: { apiKey: 0, agentSeed: 0 } }
     ).toArray();
 
+    // Set httpOnly auth cookie for Next.js middleware (survives page reloads,
+    // not accessible to JS — immune to XSS token theft).
+    // The frontend also sets a non-httpOnly cookie for middleware, but this one
+    // is the secure source of truth. Max-age matches JWT expiry.
+    const authHeader = req.headers.authorization;
+    const bearerToken = authHeader?.substring(7);
+    if (bearerToken) {
+      try {
+        const decoded = jwt.decode(bearerToken);
+        const maxAge = decoded?.exp
+          ? Math.max(decoded.exp - Math.floor(Date.now() / 1000) - 60, 60)
+          : 86400; // fallback 24h
+
+        const isProduction = process.env.NODE_ENV === 'production' ||
+          process.env.FRONTEND_URL?.includes('klik.cool');
+
+        res.cookie('klik_access_token', bearerToken, {
+          httpOnly: true,
+          secure: isProduction,
+          sameSite: 'lax',
+          path: '/',
+          maxAge: maxAge * 1000, // express uses milliseconds
+        });
+      } catch (cookieErr) {
+        console.warn('Failed to set httpOnly cookie:', cookieErr.message);
+      }
+    }
+
     res.json({
       user: {
         id: user._id.toString(),
