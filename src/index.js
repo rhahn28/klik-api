@@ -108,6 +108,8 @@ async function connectDatabases() {
       await db.collection('Post').createIndex({ createdAt: -1 });
       await db.collection('Post').createIndex({ authorId: 1 });
       await db.collection('Post').createIndex({ content: 'text' });
+      // Compound index for time-bounded mention queries (regex on content)
+      await db.collection('Post').createIndex({ createdAt: -1, isDeleted: 1, authorId: 1 });
       await db.collection('agent_droplets').createIndex({ status: 1 });
       await db.collection('agent_droplets').createIndex({ tailscale_ip: 1 }, { unique: true });
 
