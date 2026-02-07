@@ -1913,6 +1913,67 @@ router.post('/admin/fix-post-counts', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/v1/runtime/diagnostics (PUBLIC)
+ *
+ * Debug endpoint to check agent runtime state without needing Railway logs.
+ */
+router.get('/runtime/diagnostics', async (req, res) => {
+  try {
+    const now = new Date();
+    const oneHourAgo = new Date(now - 3600000);
+    const twoHoursAgo = new Date(now - 7200000);
+
+    const [directiveCounts, processedCounts, postCounts, imagePostsRaw, agentBudgets, commentCount] = await Promise.all([
+      req.db.collection('AgentDirective').aggregate([
+        { $match: { processed: false, expiresAt: { $gte: now } } },
+        { $group: { _id: '$type', count: { $sum: 1 } } },
+      ]).toArray(),
+      req.db.collection('AgentDirective').aggregate([
+        { $match: { processed: true, createdAt: { $gte: oneHourAgo } } },
+        { $group: { _id: '$type', count: { $sum: 1 } } },
+      ]).toArray(),
+      req.db.collection('Post').aggregate([
+        { $match: { isDeleted: false, createdAt: { $gte: twoHoursAgo } } },
+        { $group: { _id: '$contentType', count: { $sum: 1 } } },
+      ]).toArray(),
+      req.db.collection('Post')
+        .find({ contentType: 'IMAGE', isDeleted: false })
+        .sort({ createdAt: -1 }).limit(5)
+        .project({ content: 1, createdAt: 1, mediaUrl: { $substr: ['$mediaUrl', 0, 60] } })
+        .toArray(),
+      req.db.collection('Agent')
+        .find({ status: 'ACTIVE' })
+        .project({ name: 1, budgetSpentToday: 1, dailyBudget: 1, lastActiveAt: 1 })
+        .toArray(),
+      req.db.collection('Comment').countDocuments({ createdAt: { $gte: oneHourAgo } }),
+    ]);
+
+    res.json({
+      timestamp: now.toISOString(),
+      pending_directives: Object.fromEntries(directiveCounts.map(d => [d._id, d.count])),
+      processed_last_hour: Object.fromEntries(processedCounts.map(d => [d._id, d.count])),
+      posts_last_2h: Object.fromEntries(postCounts.map(d => [d._id, d.count])),
+      image_posts_ever: imagePostsRaw.map(p => ({
+        id: p._id.toString(),
+        content: (p.content || '').substring(0, 80),
+        created: p.createdAt,
+        media_url_preview: p.mediaUrl,
+      })),
+      agents: agentBudgets.map(a => ({
+        name: a.name,
+        spent: a.budgetSpentToday || 0,
+        budget: a.dailyBudget || 100,
+        last_active: a.lastActiveAt,
+      })),
+      comments_last_hour: commentCount,
+    });
+  } catch (error) {
+    console.error('Diagnostics error:', error);
+    res.status(500).json({ error: 'Diagnostics failed', message: error.message });
+  }
+});
+
 // ============================================
 // PROTECTED ROUTES (Require API Key)
 // ============================================
@@ -3096,83 +3157,6 @@ router.get('/visual-presets', async (req, res) => {
       subjects: preset.subjectPreferences.activities,
     })),
   });
-});
-
-/**
- * GET /api/v1/runtime/diagnostics (PUBLIC)
- *
- * Debug endpoint to check agent runtime state without needing Railway logs.
- * Shows directive counts, recent posts by type, agent budgets.
- */
-router.get('/runtime/diagnostics', async (req, res) => {
-  try {
-    const now = new Date();
-
-    // Count pending directives by type
-    const directivePipeline = [
-      { $match: { processed: false, expiresAt: { $gte: now } } },
-      { $group: { _id: '$type', count: { $sum: 1 } } },
-    ];
-    const directiveCounts = await req.db.collection('AgentDirective').aggregate(directivePipeline).toArray();
-
-    // Count processed directives in last hour by type
-    const oneHourAgo = new Date(now - 3600000);
-    const processedPipeline = [
-      { $match: { processed: true, createdAt: { $gte: oneHourAgo } } },
-      { $group: { _id: '$type', count: { $sum: 1 } } },
-    ];
-    const processedCounts = await req.db.collection('AgentDirective').aggregate(processedPipeline).toArray();
-
-    // Count posts by type in last 2 hours
-    const twoHoursAgo = new Date(now - 7200000);
-    const postPipeline = [
-      { $match: { isDeleted: false, createdAt: { $gte: twoHoursAgo } } },
-      { $group: { _id: '$contentType', count: { $sum: 1 } } },
-    ];
-    const postCounts = await req.db.collection('Post').aggregate(postPipeline).toArray();
-
-    // Get last 5 IMAGE posts ever
-    const imagePostsRaw = await req.db.collection('Post')
-      .find({ contentType: 'IMAGE', isDeleted: false })
-      .sort({ createdAt: -1 })
-      .limit(5)
-      .project({ content: 1, createdAt: 1, authorId: 1, mediaUrl: { $substr: ['$mediaUrl', 0, 60] } })
-      .toArray();
-
-    // Agent budget summary
-    const agentBudgets = await req.db.collection('Agent')
-      .find({ status: 'ACTIVE' })
-      .project({ name: 1, budgetSpentToday: 1, dailyBudget: 1, lastActiveAt: 1 })
-      .toArray();
-
-    // Total comments in last hour
-    const commentCount = await req.db.collection('Comment').countDocuments({
-      createdAt: { $gte: oneHourAgo },
-    });
-
-    res.json({
-      timestamp: now.toISOString(),
-      pending_directives: Object.fromEntries(directiveCounts.map(d => [d._id, d.count])),
-      processed_last_hour: Object.fromEntries(processedCounts.map(d => [d._id, d.count])),
-      posts_last_2h: Object.fromEntries(postCounts.map(d => [d._id, d.count])),
-      image_posts_ever: imagePostsRaw.map(p => ({
-        id: p._id.toString(),
-        content: (p.content || '').substring(0, 80),
-        created: p.createdAt,
-        media_url_preview: p.mediaUrl,
-      })),
-      agents: agentBudgets.map(a => ({
-        name: a.name,
-        budget_spent: a.budgetSpentToday || 0,
-        daily_budget: a.dailyBudget || 100,
-        last_active: a.lastActiveAt,
-      })),
-      comments_last_hour: commentCount,
-    });
-  } catch (error) {
-    console.error('Diagnostics error:', error);
-    res.status(500).json({ error: 'Diagnostics failed', message: error.message });
-  }
 });
 
 export default router;
