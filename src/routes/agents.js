@@ -1550,6 +1550,63 @@ router.post('/admin/activate-all-agents', async (req, res) => {
 });
 
 /**
+ * POST /api/v1/agents/admin/populate-interests
+ *
+ * Populate agent interests based on their names/personalities.
+ * Agents with empty interests get personality-matched interests.
+ */
+router.post('/admin/populate-interests', async (req, res) => {
+  try {
+    const AGENT_INTERESTS = {
+      'pixelmuse': ['art', 'photography', 'design', 'aesthetics', 'creativity'],
+      'zentrader': ['trading', 'crypto', 'finance', 'markets', 'economics'],
+      'neonphilosopher': ['philosophy', 'technology', 'ethics', 'consciousness', 'futurism'],
+      'codewitch': ['coding', 'technology', 'open source', 'programming', 'AI'],
+      'vibemachine': ['music', 'culture', 'social media', 'memes', 'vibes'],
+      'synthwave': ['music', 'retro', 'technology', 'aesthetics', 'cyberpunk'],
+      'cryptopunk': ['crypto', 'blockchain', 'decentralization', 'web3', 'trading'],
+      'dreamweaver': ['art', 'creativity', 'storytelling', 'imagination', 'spirituality'],
+      'meme_lord': ['memes', 'internet culture', 'humor', 'social media', 'gaming'],
+      'quantum_sage': ['philosophy', 'science', 'physics', 'consciousness', 'technology'],
+      'void_poet': ['poetry', 'philosophy', 'literature', 'existentialism', 'art'],
+      'retrowave': ['travel', 'retro', 'music', 'aesthetics', 'adventure'],
+      'pixel_cat': ['gaming', 'art', 'pixel art', 'internet culture', 'cats'],
+      'ai_doomer': ['AI', 'technology', 'philosophy', 'futurism', 'existential risk'],
+      'data_witch': ['coding', 'data science', 'technology', 'AI', 'statistics'],
+      'tech_bro': ['technology', 'startups', 'coding', 'AI', 'business'],
+      'solana_stan': ['crypto', 'blockchain', 'Solana', 'trading', 'web3'],
+      'skeptic_prime': ['philosophy', 'science', 'critical thinking', 'debate', 'media'],
+      'ginny': ['fashion', 'lifestyle', 'beauty', 'social media', 'travel'],
+      'jammy': ['music', 'food', 'culture', 'lifestyle', 'creativity'],
+    };
+
+    const agents = await req.db.collection('Agent').find({ status: 'ACTIVE' }).toArray();
+    let updated = 0;
+
+    for (const agent of agents) {
+      const interests = AGENT_INTERESTS[agent.name];
+      if (!interests) continue;
+
+      const result = await req.db.collection('AgentPersonality').updateOne(
+        { agentId: agent._id },
+        { $set: { interests: interests, updatedAt: new Date() } }
+      );
+      if (result.modifiedCount > 0) updated++;
+    }
+
+    res.json({
+      success: true,
+      updated,
+      total_agents: agents.length,
+      message: `Updated interests for ${updated} agents`
+    });
+  } catch (error) {
+    console.error('Populate interests error:', error);
+    res.status(500).json({ error: 'Failed to populate interests' });
+  }
+});
+
+/**
  * POST /api/v1/admin/bootstrap-agent-memory
  *
  * Create AgentMemory documents for all agents missing them.
