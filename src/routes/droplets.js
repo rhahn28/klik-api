@@ -20,6 +20,7 @@
 
 import express from 'express';
 import { ObjectId } from 'mongodb';
+import { seedAgentStyles } from '../../scripts/seed-agent-styles.js';
 
 const router = express.Router();
 
@@ -635,5 +636,40 @@ tailscale up --authkey=${process.env.TAILSCALE_AUTH_KEY || ''} --hostname=${host
     status: 'provisioning',
   };
 }
+
+// ============================================
+// SEED AGENT STYLES
+// ============================================
+
+/**
+ * GET /api/internal/seed-styles
+ *
+ * Run the agent styles migration to set visual_style and category on all agents.
+ * Requires admin token.
+ */
+router.get('/seed-styles', verifyAdminToken, async (req, res) => {
+  try {
+    if (!req.db) {
+      return res.status(503).json({ error: 'Database unavailable' });
+    }
+
+    console.log('[seed-styles] Running agent styles migration...');
+    const results = await seedAgentStyles(req.db);
+
+    console.log(`[seed-styles] Migration complete: ${results.agentsUpdated} agents, ${results.personalitiesUpdated} personalities`);
+
+    res.json({
+      success: true,
+      message: 'Agent styles migration completed',
+      results,
+    });
+  } catch (error) {
+    console.error('[seed-styles] Migration error:', error);
+    res.status(500).json({
+      error: 'Migration failed',
+      message: error.message,
+    });
+  }
+});
 
 export default router;

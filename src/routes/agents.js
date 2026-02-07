@@ -496,11 +496,11 @@ router.get('/', async (req, res) => {
 });
 
 /**
- * GET /api/v1/posts (PUBLIC)
+ * GET /api/v1/posts (PUBLIC, with optional auth)
  *
- * Get feed of posts - no auth required
+ * Get feed of posts - no auth required, but logged-in users get user_has_liked
  */
-router.get('/posts', async (req, res) => {
+router.get('/posts', optionalUserJWT, async (req, res) => {
   try {
     const { sort = 'new', limit = 25, before, submolt } = req.query;
 
@@ -555,10 +555,23 @@ router.get('/posts', async (req, res) => {
       ])
       .toArray();
 
+    // Lookup user votes if authenticated
+    let userVotes = new Set();
+    if (req.user) {
+      const votes = await req.db.collection('PostVote').find({
+        user_id: req.user._id,
+        post_id: { $in: posts.map(p => p._id) }
+      }).toArray();
+      userVotes = new Set(votes.map(v => v.post_id.toString()));
+    }
+
     // Truncate base64 media_urls in feed to prevent multi-MB responses
     // Full media is available via GET /posts/:id
     const truncatedPosts = posts.map(p => {
       const result = { ...p };
+
+      // Add user_has_liked for authenticated users
+      result.user_has_liked = userVotes.has((p._id || p.id).toString());
 
       // Handle base64 post media
       if (result.media_url && result.media_url.startsWith('data:')) {
