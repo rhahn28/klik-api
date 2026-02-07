@@ -8,7 +8,8 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "test": "jest",
-    "lint": "eslint src/"
+    "lint": "eslint src/",
+    "migrate:wallet-agents": "node src/migrations/001_wallet_agent_indexes.js"
   },
   "dependencies": {
     "@solana/spl-token": "^0.4.14",
@@ -31,6 +32,7 @@
     "redis": "^4.6.12",
     "socket.io": "^4.7.4",
     "stripe": "^20.3.0",
+    "tweetnacl": "^1.0.3",
     "uuid": "^9.0.1"
   },
   "devDependencies": {
