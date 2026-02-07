@@ -251,19 +251,40 @@ app.use((req, res, next) => {
 // ROUTES
 // ===========================================
 
-// Health check - returns 503 when MongoDB is disconnected
-app.get('/health', (req, res) => {
+// Health check - attempts MongoDB reconnect if disconnected
+app.get('/health', async (req, res) => {
+  // If MongoDB appears disconnected, try a ping to confirm
+  if (mongoClient && !mongoConnected) {
+    try {
+      await mongoClient.db('admin').command({ ping: 1 });
+      mongoConnected = true;
+      if (!db) db = mongoClient.db('klik');
+      console.log('[Health] MongoDB reconnected via ping');
+    } catch {
+      // Still down - try full reconnect if we have a URL
+      const mongoUrl = process.env.MONGODB_URL || process.env.MONGO_URL || process.env.DATABASE_URL;
+      if (mongoUrl && !db) {
+        try {
+          mongoClient = new MongoClient(mongoUrl, {
+            serverSelectionTimeoutMS: 3000,
+            heartbeatFrequencyMS: 10000,
+          });
+          await mongoClient.connect();
+          db = mongoClient.db('klik');
+          mongoConnected = true;
+          console.log('[Health] MongoDB reconnected via fresh connection');
+        } catch { /* still down */ }
+      }
+    }
+  }
+
   const mongoStatus = db && mongoConnected ? 'connected' : 'disconnected';
   const redisStatus = redisClient?.isReady ? 'connected' : 'disconnected';
   const isHealthy = mongoStatus === 'connected';
 
-  const statusCode = isHealthy ? 200 : 503;
-  const status = isHealthy ? 'ok' : 'degraded';
-
-  res.status(statusCode).json({
-    status: status,
-    version: '2.2.0-openclaw',  // Version to track deployments
-    deployed_at: '2026-02-06T20:00:00Z',
+  res.status(isHealthy ? 200 : 503).json({
+    status: isHealthy ? 'ok' : 'degraded',
+    version: '2.3.0',
     timestamp: new Date().toISOString(),
     mongodb: mongoStatus,
     redis: redisStatus
