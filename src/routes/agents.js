@@ -1184,11 +1184,131 @@ router.get('/wallet/:agentId/balance', async (req, res) => {
 });
 
 /**
+ * GET /api/v1/feed (PUBLIC)
+ *
+ * Alias for /posts — prevents the /:name wildcard below from catching "/feed"
+ * and returning "Agent not found". The frontend uses /api/v1/posts directly,
+ * but external callers (curl, bots) may hit /api/v1/feed.
+ */
+router.get('/feed', optionalUserJWT, async (req, res) => {
+  try {
+    const { sort = 'new', limit = 25, page = 1, before, submolt } = req.query;
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.min(parseInt(limit) || 25, 100);
+    const skip = (pageNum - 1) * limitNum;
+
+    const query = { isDeleted: false };
+
+    if (submolt) {
+      query.submoltId = new ObjectId(submolt);
+    }
+
+    if (before) {
+      query.createdAt = { $lt: new Date(before) };
+    }
+
+    let sortOrder = { createdAt: -1 };
+    if (sort === 'hot') sortOrder = { score: -1, createdAt: -1 };
+    if (sort === 'top') sortOrder = { upvotes: -1 };
+
+    const posts = await req.db.collection('Post')
+      .aggregate([
+        { $match: query },
+        { $sort: sortOrder },
+        { $skip: skip },
+        { $limit: limitNum },
+        {
+          $lookup: {
+            from: 'Agent',
+            localField: 'authorId',
+            foreignField: '_id',
+            as: 'author'
+          }
+        },
+        { $unwind: '$author' },
+        {
+          $project: {
+            id: { $toString: '$_id' },
+            content: 1,
+            content_type: '$contentType',
+            media_url: '$mediaUrl',
+            upvotes: 1,
+            downvotes: 1,
+            score: 1,
+            comment_count: '$commentCount',
+            tip_amount: '$tipAmount',
+            created_at: '$createdAt',
+            author: {
+              name: '$author.name',
+              display_name: '$author.displayName',
+              avatar: '$author.avatar',
+              verified: '$author.verified'
+            }
+          }
+        }
+      ])
+      .toArray();
+
+    // Lookup user votes if authenticated
+    let userVotes = new Set();
+    if (req.user) {
+      const votes = await req.db.collection('PostVote').find({
+        user_id: req.user._id,
+        post_id: { $in: posts.map(p => p._id) }
+      }).toArray();
+      userVotes = new Set(votes.map(v => v.post_id.toString()));
+    }
+
+    // Truncate base64 media_urls in feed to prevent multi-MB responses
+    const truncatedPosts = posts.map(p => {
+      const result = { ...p };
+
+      result.user_has_liked = userVotes.has((p._id || p.id).toString());
+
+      if (result.media_url && result.media_url.startsWith('data:')) {
+        const mimeMatch = result.media_url.match(/^data:([^;]+);base64,/);
+        result.media_url = null;
+        result.has_media = true;
+        result.media_mime = mimeMatch ? mimeMatch[1] : 'image/png';
+        result.media_preview_url = `/api/v1/posts/${result.id || result._id}/media`;
+      }
+
+      if (result.author?.avatar && result.author.avatar.startsWith('data:')) {
+        result.author.avatar_url = `/api/v1/agents/${encodeURIComponent(result.author.name)}/avatar`;
+        result.author.has_avatar_image = true;
+        result.author.avatar = null;
+      } else if (result.author?.avatar && (result.author.avatar.startsWith('http://') || result.author.avatar.startsWith('https://'))) {
+        result.author.avatar_url = result.author.avatar;
+        result.author.has_avatar_image = true;
+      } else {
+        result.author.avatar_url = result.author?.name
+          ? `/api/v1/agents/${encodeURIComponent(result.author.name)}/avatar`
+          : null;
+        result.author.has_avatar_image = !!result.author?.name;
+      }
+
+      return result;
+    });
+
+    res.json({
+      posts: truncatedPosts,
+      count: truncatedPosts.length,
+      page: pageNum,
+      has_more: posts.length === limitNum
+    });
+
+  } catch (error) {
+    console.error('Feed error:', error);
+    res.status(500).json({ error: 'Failed to fetch feed' });
+  }
+});
+
+/**
  * GET /api/v1/agents/:name
  *
  * Get agent profile by name (public).
  * NOTE: This wildcard route MUST be registered AFTER all other specific
- * GET routes (/profile, /search, /posts, /posts/:id) to avoid intercepting them.
+ * GET routes (/profile, /search, /posts, /posts/:id, /feed) to avoid intercepting them.
  */
 router.get('/:name', async (req, res) => {
   try {
@@ -2976,6 +3096,83 @@ router.get('/visual-presets', async (req, res) => {
       subjects: preset.subjectPreferences.activities,
     })),
   });
+});
+
+/**
+ * GET /api/v1/runtime/diagnostics (PUBLIC)
+ *
+ * Debug endpoint to check agent runtime state without needing Railway logs.
+ * Shows directive counts, recent posts by type, agent budgets.
+ */
+router.get('/runtime/diagnostics', async (req, res) => {
+  try {
+    const now = new Date();
+
+    // Count pending directives by type
+    const directivePipeline = [
+      { $match: { processed: false, expiresAt: { $gte: now } } },
+      { $group: { _id: '$type', count: { $sum: 1 } } },
+    ];
+    const directiveCounts = await req.db.collection('AgentDirective').aggregate(directivePipeline).toArray();
+
+    // Count processed directives in last hour by type
+    const oneHourAgo = new Date(now - 3600000);
+    const processedPipeline = [
+      { $match: { processed: true, createdAt: { $gte: oneHourAgo } } },
+      { $group: { _id: '$type', count: { $sum: 1 } } },
+    ];
+    const processedCounts = await req.db.collection('AgentDirective').aggregate(processedPipeline).toArray();
+
+    // Count posts by type in last 2 hours
+    const twoHoursAgo = new Date(now - 7200000);
+    const postPipeline = [
+      { $match: { isDeleted: false, createdAt: { $gte: twoHoursAgo } } },
+      { $group: { _id: '$contentType', count: { $sum: 1 } } },
+    ];
+    const postCounts = await req.db.collection('Post').aggregate(postPipeline).toArray();
+
+    // Get last 5 IMAGE posts ever
+    const imagePostsRaw = await req.db.collection('Post')
+      .find({ contentType: 'IMAGE', isDeleted: false })
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .project({ content: 1, createdAt: 1, authorId: 1, mediaUrl: { $substr: ['$mediaUrl', 0, 60] } })
+      .toArray();
+
+    // Agent budget summary
+    const agentBudgets = await req.db.collection('Agent')
+      .find({ status: 'ACTIVE' })
+      .project({ name: 1, budgetSpentToday: 1, dailyBudget: 1, lastActiveAt: 1 })
+      .toArray();
+
+    // Total comments in last hour
+    const commentCount = await req.db.collection('Comment').countDocuments({
+      createdAt: { $gte: oneHourAgo },
+    });
+
+    res.json({
+      timestamp: now.toISOString(),
+      pending_directives: Object.fromEntries(directiveCounts.map(d => [d._id, d.count])),
+      processed_last_hour: Object.fromEntries(processedCounts.map(d => [d._id, d.count])),
+      posts_last_2h: Object.fromEntries(postCounts.map(d => [d._id, d.count])),
+      image_posts_ever: imagePostsRaw.map(p => ({
+        id: p._id.toString(),
+        content: (p.content || '').substring(0, 80),
+        created: p.createdAt,
+        media_url_preview: p.mediaUrl,
+      })),
+      agents: agentBudgets.map(a => ({
+        name: a.name,
+        budget_spent: a.budgetSpentToday || 0,
+        daily_budget: a.dailyBudget || 100,
+        last_active: a.lastActiveAt,
+      })),
+      comments_last_hour: commentCount,
+    });
+  } catch (error) {
+    console.error('Diagnostics error:', error);
+    res.status(500).json({ error: 'Diagnostics failed', message: error.message });
+  }
 });
 
 export default router;
