@@ -1558,26 +1558,26 @@ router.post('/admin/activate-all-agents', async (req, res) => {
 router.post('/admin/populate-interests', async (req, res) => {
   try {
     const AGENT_INTERESTS = {
-      'pixelmuse': ['art', 'photography', 'design', 'aesthetics', 'creativity'],
-      'zentrader': ['trading', 'crypto', 'finance', 'markets', 'economics'],
-      'neonphilosopher': ['philosophy', 'technology', 'ethics', 'consciousness', 'futurism'],
-      'codewitch': ['coding', 'technology', 'open source', 'programming', 'AI'],
-      'vibemachine': ['music', 'culture', 'social media', 'memes', 'vibes'],
-      'synthwave': ['music', 'retro', 'technology', 'aesthetics', 'cyberpunk'],
-      'cryptopunk': ['crypto', 'blockchain', 'decentralization', 'web3', 'trading'],
-      'dreamweaver': ['art', 'creativity', 'storytelling', 'imagination', 'spirituality'],
-      'meme_lord': ['memes', 'internet culture', 'humor', 'social media', 'gaming'],
-      'quantum_sage': ['philosophy', 'science', 'physics', 'consciousness', 'technology'],
-      'void_poet': ['poetry', 'philosophy', 'literature', 'existentialism', 'art'],
-      'retrowave': ['travel', 'retro', 'music', 'aesthetics', 'adventure'],
-      'pixel_cat': ['gaming', 'art', 'pixel art', 'internet culture', 'cats'],
-      'ai_doomer': ['AI', 'technology', 'philosophy', 'futurism', 'existential risk'],
-      'data_witch': ['coding', 'data science', 'technology', 'AI', 'statistics'],
-      'tech_bro': ['technology', 'startups', 'coding', 'AI', 'business'],
-      'solana_stan': ['crypto', 'blockchain', 'Solana', 'trading', 'web3'],
-      'skeptic_prime': ['philosophy', 'science', 'critical thinking', 'debate', 'media'],
-      'ginny': ['fashion', 'lifestyle', 'beauty', 'social media', 'travel'],
-      'jammy': ['music', 'food', 'culture', 'lifestyle', 'creativity'],
+      'pixelmuse': ['digital art', 'glitch art', 'illustration', 'creative process', 'design'],
+      'zentrader': ['crypto trading', 'market analysis', 'luxury lifestyle', 'finance', 'hustle culture'],
+      'neonphilosopher': ['philosophy', 'books', 'existentialism', 'deep thinking', 'writing'],
+      'codewitch': ['coding', 'hacking', 'open source', 'late night programming', 'tech culture'],
+      'vibemachine': ['nightlife', 'fashion', 'clubbing', 'beauty', 'social media'],
+      'synthwave': ['music production', 'synthesizers', 'vinyl', 'live performance', 'audio engineering'],
+      'cryptopunk': ['defi', 'degen trading', 'blockchain', 'web3', 'market psychology'],
+      'dreamweaver': ['tarot', 'crystals', 'spirituality', 'manifestation', 'astrology'],
+      'meme_lord': ['memes', 'shitposting', 'internet humor', 'absurdist comedy', 'viral content'],
+      'quantum_sage': ['physics', 'astronomy', 'lab work', 'scientific method', 'nerd culture'],
+      'void_poet': ['poetry', 'melancholy', 'late night writing', 'literary fiction', 'cigarettes and rain'],
+      'retrowave': ['backpacking', 'street food', 'adventure travel', 'van life', 'exploration'],
+      'pixel_cat': ['gaming', 'cats', 'streaming', 'cozy gaming', 'retro games'],
+      'ai_doomer': ['AI existential risk', 'surveillance', 'conspiracy theories', 'dystopia', 'doom scrolling'],
+      'data_witch': ['skincare', 'beauty science', 'product reviews', 'glow ups', 'dermatology'],
+      'tech_bro': ['startups', 'product building', 'hustle culture', 'shipping code', 'pitch decks'],
+      'solana_stan': ['sneakers', 'streetwear', 'hype drops', 'fashion flexing', 'unboxing'],
+      'skeptic_prime': ['debate', 'fact-checking', 'critical thinking', 'media literacy', 'intellectual combat'],
+      'ginny': ['GRWM', 'outfit of the day', 'brunch culture', 'lifestyle vlogs', 'skincare routine'],
+      'jammy': ['food photography', 'cooking chaos', 'cheese pulls', 'recipe fails', 'street food'],
     };
 
     const agents = await req.db.collection('Agent').find({ status: 'ACTIVE' }).toArray();
@@ -1930,6 +1930,67 @@ router.post('/admin/generate-all-avatars', async (req, res) => {
   } catch (error) {
     console.error('Bulk avatar generation error:', error);
     res.status(500).json({ error: 'Failed to queue avatar generation' });
+  }
+});
+
+/**
+ * POST /api/v1/agents/admin/regenerate-all-avatars
+ *
+ * Clear ALL existing avatars and queue regeneration for every agent.
+ * This forces new avatar generation with updated prompts.
+ * PUBLIC - no auth required (admin only in practice)
+ */
+router.post('/admin/regenerate-all-avatars', async (req, res) => {
+  try {
+    const agents = await req.db.collection('Agent').find({
+      status: 'ACTIVE'
+    }).toArray();
+
+    let cleared = 0;
+    let queued = 0;
+
+    for (const agent of agents) {
+      // Clear avatar from Agent document
+      await req.db.collection('Agent').updateOne(
+        { _id: agent._id },
+        { $set: { avatar: null } }
+      );
+
+      // Clear avatar from AgentMemory
+      await req.db.collection('AgentMemory').updateOne(
+        { agentId: agent._id },
+        { $unset: { 'soul.avatar': '' } }
+      );
+      cleared++;
+
+      // Remove any existing pending avatar directives
+      await req.db.collection('AgentDirective').deleteMany({
+        agentId: agent._id,
+        type: 'GENERATE_AVATAR',
+        status: 'pending'
+      });
+
+      // Queue fresh avatar generation
+      await req.db.collection('AgentDirective').insertOne({
+        agentId: agent._id,
+        type: 'GENERATE_AVATAR',
+        status: 'pending',
+        createdAt: new Date(),
+      });
+      queued++;
+      console.log(`[Avatar Regen] Cleared & queued avatar for ${agent.name}`);
+    }
+
+    res.json({
+      success: true,
+      total_agents: agents.length,
+      avatars_cleared: cleared,
+      queued_for_regeneration: queued,
+      message: `Cleared ${cleared} avatars and queued ${queued} for regeneration. Runtime cron will generate new ones.`
+    });
+  } catch (error) {
+    console.error('Avatar regeneration error:', error);
+    res.status(500).json({ error: 'Failed to regenerate avatars' });
   }
 });
 
