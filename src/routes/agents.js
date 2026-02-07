@@ -8,6 +8,7 @@
 import express from 'express';
 import crypto from 'crypto';
 import { ObjectId } from 'mongodb';
+import { optionalUserJWT } from '../middleware/userAuth.js';
 
 const router = express.Router();
 
@@ -163,8 +164,11 @@ const checkRateLimit = (agentId, action) => {
  *
  * Register a new external AI agent (Moltbook-style)
  * Returns API key and verification code
+ *
+ * If user is authenticated (JWT provided), the agent is linked to their account.
+ * If not authenticated, the agent is created as "unclaimed" and can be claimed later.
  */
-router.post('/register', async (req, res) => {
+router.post('/register', optionalUserJWT, async (req, res) => {
   try {
     const {
       name, description, wallet_signature, stake_tx_hash,
@@ -217,6 +221,13 @@ router.post('/register', async (req, res) => {
     // Save appearance emoji as temporary avatar until AI generates a real one
     const initialAvatar = appearance?.avatar || null;
 
+    // Determine owner and claim status based on authentication
+    // If user is logged in, link agent to their account
+    // If not logged in, mark as unclaimed so it can be claimed later
+    const isAuthenticated = !!req.user;
+    const ownerId = isAuthenticated ? req.user._id : null;
+    const claimStatus = isAuthenticated ? 'claimed' : 'unclaimed';
+
     const agent = {
       name: name.toLowerCase(),
       displayName: name,
@@ -231,6 +242,10 @@ router.post('/register', async (req, res) => {
       isExternal: true,
       status: 'ACTIVE',
       autonomyLevel: 'FULLY_AUTONOMOUS',
+      // Ownership
+      owner: ownerId,              // User._id if authenticated, null if unclaimed
+      claimStatus: claimStatus,    // 'claimed' or 'unclaimed'
+      claimedAt: isAuthenticated ? new Date() : null,
       // AI provider config
       aiProvider: ai_provider || 'platform',
       aiApiKey: ai_api_key || null, // TODO: encrypt in production
@@ -321,20 +336,31 @@ router.post('/register', async (req, res) => {
       updatedAt: new Date(),
     });
 
-    res.status(201).json({
+    // Build response based on authentication status
+    const response = {
       success: true,
       agent_id: result.insertedId.toString(),
       api_key: apiKey,
-      claim_url: `https://klik.cool/claim/${result.insertedId}`,
       verification_code: verificationCode,
       message: 'SAVE YOUR API KEY! It will not be shown again.',
+      // Ownership info
+      owner_id: ownerId?.toString() || null,
+      claim_status: claimStatus,
       next_steps: [
         '1. Save your API key securely',
         '2. Provision your agent: POST /api/v1/dashboard/provision (with your API key)',
         '3. Send directives: POST /api/v1/dashboard/directive',
         '4. View dashboard: GET /api/v1/dashboard/me'
       ]
-    });
+    };
+
+    // If unclaimed, provide claim URL
+    if (claimStatus === 'unclaimed') {
+      response.claim_url = `https://klik.cool/claim/${result.insertedId}`;
+      response.next_steps.unshift('0. Claim your agent by signing in at the claim URL');
+    }
+
+    res.status(201).json(response);
 
   } catch (error) {
     console.error('Registration error:', error);
