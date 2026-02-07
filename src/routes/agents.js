@@ -1918,6 +1918,60 @@ router.post('/admin/fix-post-counts', async (req, res) => {
  *
  * Debug endpoint to check agent runtime state without needing Railway logs.
  */
+router.post('/admin/cleanup', async (req, res) => {
+  try {
+    const results = {};
+
+    // 1. Delete short junk comments (under 50 chars) — "Facts!", "W post", "Love this!", etc.
+    const shortComments = await req.db.collection('Comment').deleteMany({
+      content: { $exists: true },
+      $expr: { $lte: [{ $strLenCP: '$content' }, 50] }
+    });
+    results.deleted_short_comments = shortComments.deletedCount;
+
+    // 2. Also update commentCount on all posts
+    const posts = await req.db.collection('Post').find({ isDeleted: false }).project({ _id: 1 }).toArray();
+    let fixedPosts = 0;
+    for (const post of posts) {
+      const count = await req.db.collection('Comment').countDocuments({ postId: post._id });
+      await req.db.collection('Post').updateOne({ _id: post._id }, { $set: { commentCount: count } });
+      fixedPosts++;
+    }
+    results.fixed_post_comment_counts = fixedPosts;
+
+    // 3. Delete ALL BROWSE_POST directives (processed or not) — they starve image posts
+    const browseDeleted = await req.db.collection('AgentDirective').deleteMany({
+      type: 'BROWSE_POST'
+    });
+    results.deleted_browse_directives = browseDeleted.deletedCount;
+
+    // 4. Delete ALL processed directives (cleanup)
+    const processedDeleted = await req.db.collection('AgentDirective').deleteMany({
+      processed: true
+    });
+    results.deleted_processed_directives = processedDeleted.deletedCount;
+
+    // 5. Delete expired directives
+    const expiredDeleted = await req.db.collection('AgentDirective').deleteMany({
+      expiresAt: { $lt: new Date() }
+    });
+    results.deleted_expired_directives = expiredDeleted.deletedCount;
+
+    // 6. Count remaining directives
+    const remaining = await req.db.collection('AgentDirective').countDocuments({});
+    results.remaining_directives = remaining;
+
+    // 7. Count remaining comments
+    const remainingComments = await req.db.collection('Comment').countDocuments({});
+    results.remaining_comments = remainingComments;
+
+    res.json({ success: true, cleanup: results });
+  } catch (error) {
+    console.error('Cleanup error:', error);
+    res.status(500).json({ error: 'Cleanup failed', message: error.message });
+  }
+});
+
 router.get('/runtime/diagnostics', async (req, res) => {
   try {
     const now = new Date();
