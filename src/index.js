@@ -91,54 +91,115 @@ app.use('/api/', limiter);
 
 let db;
 let redisClient;
+let mongoClient;
+
+// MongoDB connection state for health checks
+let mongoConnected = false;
 
 async function connectDatabases() {
-  // MongoDB
+  // MongoDB with retry logic
   const mongoUrl = process.env.MONGODB_URL || process.env.MONGO_URL || process.env.DATABASE_URL;
   if (mongoUrl) {
-    try {
-      const mongoClient = new MongoClient(mongoUrl);
-      await mongoClient.connect();
-      db = mongoClient.db('klik');
-      console.log('Connected to MongoDB');
+    const MAX_RETRIES = 5;
+    const BASE_DELAY = 1000; // 1 second
 
-      // Create indexes
-      await db.collection('Agent').createIndex({ name: 1 }, { unique: true });
-      await db.collection('Agent').createIndex({ apiKey: 1 });
-      await db.collection('Post').createIndex({ createdAt: -1 });
-      await db.collection('Post').createIndex({ authorId: 1 });
-      await db.collection('Post').createIndex({ content: 'text' });
-      // Compound index for time-bounded mention queries (regex on content)
-      await db.collection('Post').createIndex({ createdAt: -1, isDeleted: 1, authorId: 1 });
-      await db.collection('agent_droplets').createIndex({ status: 1 });
-      await db.collection('agent_droplets').createIndex({ tailscale_ip: 1 }, { unique: true });
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        console.log(`[MongoDB] Connection attempt ${attempt}/${MAX_RETRIES}...`);
+        mongoClient = new MongoClient(mongoUrl, {
+          serverSelectionTimeoutMS: 5000,
+          heartbeatFrequencyMS: 10000,
+        });
 
-      // Wallet agent indexes (OpenClaw claim system)
-      await db.collection('Agent').createIndex(
-        { 'walletAgentData.sourceWallet': 1 },
-        { sparse: true, unique: true }
-      );
-      await db.collection('Agent').createIndex({
-        isWalletAgent: 1,
-        'walletAgentData.claimStatus': 1,
-      });
-      await db.collection('Agent').createIndex({
-        isWalletAgent: 1,
-        'walletAgentData.claimDeadline': 1,
-        'walletAgentData.claimStatus': 1,
-      });
-      await db.collection('wallet_agent_notifications').createIndex({
-        agentId: 1,
-        template: 1,
-        status: 1,
-      });
-      await db.collection('wallet_agent_claims').createIndex({
-        walletAddress: 1,
-        event: 1,
-      });
-    } catch (error) {
-      console.error('MongoDB connection error:', error.message);
-      console.log('Server will start without MongoDB - some features will be unavailable');
+        // Set up topology event handlers for auto-reconnect awareness
+        mongoClient.on('serverDescriptionChanged', (event) => {
+          const newType = event.newDescription.type;
+          if (newType === 'Unknown') {
+            console.warn('[MongoDB] Server became unavailable, waiting for reconnect...');
+            mongoConnected = false;
+          } else {
+            console.log(`[MongoDB] Server type changed to: ${newType}`);
+            mongoConnected = true;
+          }
+        });
+
+        mongoClient.on('topologyDescriptionChanged', (event) => {
+          const servers = Array.from(event.newDescription.servers.values());
+          const hasConnectedServer = servers.some(s => s.type !== 'Unknown');
+          if (hasConnectedServer && !mongoConnected) {
+            console.log('[MongoDB] Reconnected to cluster');
+            mongoConnected = true;
+          } else if (!hasConnectedServer && mongoConnected) {
+            console.warn('[MongoDB] Lost connection to all servers');
+            mongoConnected = false;
+          }
+        });
+
+        mongoClient.on('close', () => {
+          console.warn('[MongoDB] Connection closed');
+          mongoConnected = false;
+        });
+
+        mongoClient.on('error', (err) => {
+          console.error('[MongoDB] Client error:', err.message);
+          mongoConnected = false;
+        });
+
+        await mongoClient.connect();
+        db = mongoClient.db('klik');
+        mongoConnected = true;
+        console.log('[MongoDB] Connected successfully');
+
+        // Create indexes
+        await db.collection('Agent').createIndex({ name: 1 }, { unique: true });
+        await db.collection('Agent').createIndex({ apiKey: 1 });
+        await db.collection('Post').createIndex({ createdAt: -1 });
+        await db.collection('Post').createIndex({ authorId: 1 });
+        await db.collection('Post').createIndex({ content: 'text' });
+        // Compound index for time-bounded mention queries (regex on content)
+        await db.collection('Post').createIndex({ createdAt: -1, isDeleted: 1, authorId: 1 });
+        await db.collection('agent_droplets').createIndex({ status: 1 });
+        await db.collection('agent_droplets').createIndex({ tailscale_ip: 1 }, { unique: true });
+
+        // Wallet agent indexes (OpenClaw claim system)
+        await db.collection('Agent').createIndex(
+          { 'walletAgentData.sourceWallet': 1 },
+          { sparse: true, unique: true }
+        );
+        await db.collection('Agent').createIndex({
+          isWalletAgent: 1,
+          'walletAgentData.claimStatus': 1,
+        });
+        await db.collection('Agent').createIndex({
+          isWalletAgent: 1,
+          'walletAgentData.claimDeadline': 1,
+          'walletAgentData.claimStatus': 1,
+        });
+        await db.collection('wallet_agent_notifications').createIndex({
+          agentId: 1,
+          template: 1,
+          status: 1,
+        });
+        await db.collection('wallet_agent_claims').createIndex({
+          walletAddress: 1,
+          event: 1,
+        });
+
+        // Successfully connected, break out of retry loop
+        break;
+      } catch (error) {
+        console.error(`[MongoDB] Connection attempt ${attempt} failed:`, error.message);
+
+        if (attempt < MAX_RETRIES) {
+          const delay = BASE_DELAY * Math.pow(2, attempt - 1); // Exponential backoff: 1s, 2s, 4s, 8s, 16s
+          console.log(`[MongoDB] Retrying in ${delay / 1000}s...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+          console.error('[MongoDB] CRITICAL: All connection attempts failed');
+          console.log('[MongoDB] Server will start without MongoDB - some features will be unavailable');
+          mongoConnected = false;
+        }
+      }
     }
   } else {
     console.log('No MONGODB_URL set - running without database');
@@ -190,15 +251,22 @@ app.use((req, res, next) => {
 // ROUTES
 // ===========================================
 
-// Health check
+// Health check - returns 503 when MongoDB is disconnected
 app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
+  const mongoStatus = db && mongoConnected ? 'connected' : 'disconnected';
+  const redisStatus = redisClient?.isReady ? 'connected' : 'disconnected';
+  const isHealthy = mongoStatus === 'connected';
+
+  const statusCode = isHealthy ? 200 : 503;
+  const status = isHealthy ? 'ok' : 'degraded';
+
+  res.status(statusCode).json({
+    status: status,
     version: '2.2.0-openclaw',  // Version to track deployments
     deployed_at: '2026-02-06T20:00:00Z',
     timestamp: new Date().toISOString(),
-    mongodb: db ? 'connected' : 'disconnected',
-    redis: redisClient?.isReady ? 'connected' : 'disconnected'
+    mongodb: mongoStatus,
+    redis: redisStatus
   });
 });
 
@@ -221,32 +289,12 @@ app.get('/api', (req, res) => {
   });
 });
 
-// Agent routes (Moltbook-style API)
-app.use('/api/v1/agents', agentRoutes);
-app.use('/api/v1', agentRoutes); // Also mount at root for /posts, /search
-
-// Agent dashboard routes (API key auth — owner-facing)
-app.use('/api/v1/dashboard', dashboardRoutes);
-
-// Internal droplet management routes (admin token required)
-app.use('/api/internal', dropletRoutes);
-
-// User authentication routes
-app.use('/api/v1/auth', authRoutes);
-
-// Stripe billing routes
-app.use('/api/v1/billing', billingRoutes);
-
-// User agent management routes
-app.use('/api/v1/user-agents', userAgentsRoutes);
-
-// User withdrawal routes
-app.use('/api/v1/user', withdrawRoutes);
-
-// User posts routes (create posts, comments, tips as human user)
-app.use('/api/v1/user', userPostsRoutes);
+// ===========================================
+// ROUTE ORDERING: Specific routes FIRST, wildcard routes LAST
+// ===========================================
 
 // OpenClaw claim routes (wallet agent claiming, opt-out, stats)
+// MUST be before agent routes to avoid /:name wildcard shadowing
 app.use('/api/v1/claim', claimRoutes);
 
 // OpenClaw orphan routes (orphaned agent listing, adoption, watchlist)
@@ -264,6 +312,32 @@ app.get('/api/v1/price/klik', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch price' });
   }
 });
+
+// Agent dashboard routes (API key auth — owner-facing)
+app.use('/api/v1/dashboard', dashboardRoutes);
+
+// User authentication routes
+app.use('/api/v1/auth', authRoutes);
+
+// Stripe billing routes
+app.use('/api/v1/billing', billingRoutes);
+
+// User agent management routes
+app.use('/api/v1/user-agents', userAgentsRoutes);
+
+// User withdrawal routes - mount at BOTH paths for frontend compatibility
+app.use('/api/v1/withdraw', withdrawRoutes);  // Frontend calls /api/v1/withdraw/withdraw
+app.use('/api/v1/user', withdrawRoutes);      // Backwards compat
+
+// User posts routes (create posts, comments, tips as human user)
+app.use('/api/v1/user', userPostsRoutes);
+
+// Internal droplet management routes (admin token required)
+app.use('/api/internal', dropletRoutes);
+
+// Agent routes (Moltbook-style API) - LAST because /:name is a wildcard
+app.use('/api/v1/agents', agentRoutes);
+app.use('/api/v1', agentRoutes); // Also mount at root for /posts, /search
 
 // ===========================================
 // SOCKET.IO HANDLERS

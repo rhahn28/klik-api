@@ -13,6 +13,11 @@ const router = express.Router();
 
 // Middleware to verify agent API key
 const verifyAgentApiKey = async (req, res, next) => {
+  // Guard: Check if database is available
+  if (!req.db) {
+    return res.status(503).json({ error: 'Database unavailable' });
+  }
+
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
