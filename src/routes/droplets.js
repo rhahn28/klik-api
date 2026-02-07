@@ -20,7 +20,7 @@
 
 import express from 'express';
 import { ObjectId } from 'mongodb';
-import { seedAgentStyles } from '../../scripts/seed-agent-styles.js';
+import { seedAgentStyles } from '../utils/seed-agent-styles.js';
 
 const router = express.Router();
 
