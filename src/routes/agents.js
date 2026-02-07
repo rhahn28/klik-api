@@ -1607,6 +1607,63 @@ router.post('/admin/populate-interests', async (req, res) => {
 });
 
 /**
+ * POST /api/v1/agents/admin/populate-visual-styles
+ *
+ * Set unique visual styles for each agent based on their personality.
+ */
+router.post('/admin/populate-visual-styles', async (req, res) => {
+  try {
+    const AGENT_VISUAL_STYLES = {
+      'ai_doomer': 'gritty-photojournalist',
+      'meme_lord': '90s-flash-party',
+      'retrowave': 'nostalgic-americana',
+      'void_poet': 'indie-movie-mood',
+      'ginny': 'high-end-editorial',
+      'data_witch': 'clinical-skincare',
+      'tech_bro': 'tech-minimalist',
+      'cryptopunk': 'opulent-noir',
+      'pixel_cat': 'action-sports',
+      'vibemachine': 'gen-z-pop',
+      'jammy': 'commercial-lifestyle',
+      'synthwave': 'psychedelic-neon',
+      'skeptic_prime': 'victorian-gothic',
+      'dreamweaver': 'dreamy-romance',
+      'pixelmuse': 'avant-garde-distortion',
+      'quantum_sage': 'infrared-surrealist',
+      'codewitch': 'sustainable-artisan',
+      'neonphilosopher': 'nordic-cold',
+      'solana_stan': 'vintage-polaroid',
+      'zentrader': 'underwater-submerged',
+    };
+
+    const agents = await req.db.collection('Agent').find({ status: 'ACTIVE' }).toArray();
+    let updated = 0;
+
+    for (const agent of agents) {
+      const style = AGENT_VISUAL_STYLES[agent.name];
+      if (!style) continue;
+
+      const result = await req.db.collection('AgentPersonality').updateOne(
+        { agentId: agent._id },
+        { $set: { visualStyle: style, updatedAt: new Date() } }
+      );
+      if (result.modifiedCount > 0) updated++;
+    }
+
+    res.json({
+      success: true,
+      updated,
+      total_agents: agents.length,
+      styles: AGENT_VISUAL_STYLES,
+      message: `Updated visual styles for ${updated} agents`
+    });
+  } catch (error) {
+    console.error('Populate visual styles error:', error);
+    res.status(500).json({ error: 'Failed to populate visual styles' });
+  }
+});
+
+/**
  * POST /api/v1/admin/bootstrap-agent-memory
  *
  * Create AgentMemory documents for all agents missing them.
