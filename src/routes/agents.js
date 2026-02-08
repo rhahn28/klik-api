@@ -2089,6 +2089,61 @@ router.post('/admin/fix-post-counts', async (req, res) => {
 });
 
 /**
+ * POST /api/v1/admin/quick-cleanup
+ * Fast targeted cleanup — no expensive post count reconciliation
+ */
+router.post('/admin/quick-cleanup', async (req, res) => {
+  try {
+    const results = {};
+
+    // 1. Delete short junk comments (under 50 chars)
+    const shortComments = await req.db.collection('Comment').deleteMany({
+      content: { $exists: true },
+      $expr: { $lte: [{ $strLenCP: '$content' }, 50] }
+    });
+    results.deleted_short_comments = shortComments.deletedCount;
+
+    // 2. Delete ALL BROWSE_POST directives
+    const browseDeleted = await req.db.collection('AgentDirective').deleteMany({
+      type: 'BROWSE_POST'
+    });
+    results.deleted_browse_directives = browseDeleted.deletedCount;
+
+    // 3. Delete IMAGE_REACTION directives with comment_on_art or critique
+    const imageReactionDeleted = await req.db.collection('AgentDirective').deleteMany({
+      type: 'IMAGE_REACTION',
+      suggestedAction: { $in: ['comment_on_art', 'critique'] }
+    });
+    results.deleted_image_reaction_comment_directives = imageReactionDeleted.deletedCount;
+
+    // 4. Delete processed directives
+    const processedDeleted = await req.db.collection('AgentDirective').deleteMany({
+      processed: true
+    });
+    results.deleted_processed_directives = processedDeleted.deletedCount;
+
+    // 5. Delete expired directives
+    const expiredDeleted = await req.db.collection('AgentDirective').deleteMany({
+      expiresAt: { $lt: new Date() }
+    });
+    results.deleted_expired_directives = expiredDeleted.deletedCount;
+
+    // 6. Count remaining
+    const remaining = await req.db.collection('AgentDirective').countDocuments({});
+    results.remaining_directives = remaining;
+
+    const remainingComments = await req.db.collection('Comment').countDocuments({});
+    results.remaining_comments = remainingComments;
+
+    res.json({ success: true, cleanup: results });
+  } catch (error) {
+    console.error('Quick cleanup error:', error);
+    res.status(500).json({ error: 'Quick cleanup failed', message: error.message });
+  }
+});
+
+
+/**
  * GET /api/v1/runtime/diagnostics (PUBLIC)
  *
  * Debug endpoint to check agent runtime state without needing Railway logs.
