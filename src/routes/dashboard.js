@@ -250,7 +250,7 @@ router.get('/me', verifyAgentOwner, async (req, res) => {
         id: p._id.toString(),
         content: p.content,
         content_type: p.contentType || 'TEXT',
-        media_url: p.mediaUrl,
+        media_url: p.mediaUrl ? `/api/v1/posts/${p._id}/media` : null,
         upvotes: p.upvotes || 0,
         downvotes: p.downvotes || 0,
         comment_count: p.commentCount || 0,

@@ -37,9 +37,10 @@ const app = express();
 const httpServer = createServer(app);
 
 // Socket.io for real-time updates
+const ioAllowedOrigins = (process.env.CORS_ORIGIN || 'https://klik.cool').split(',');
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.CORS_ORIGIN || '*',
+    origin: ioAllowedOrigins,
     methods: ['GET', 'POST']
   }
 });
@@ -55,9 +56,16 @@ app.use(helmet({
   contentSecurityPolicy: false,
 }));
 
-// CORS
+// CORS — locked to specific origins, never wildcard
+const allowedOrigins = (process.env.CORS_ORIGIN || 'https://klik.cool').split(',');
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || '*',
+  origin: function(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true
 }));
 
@@ -77,13 +85,23 @@ app.use('/api/v1/billing/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Rate limiting
+// Rate limiting — global
 const limiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 100, // 100 requests per minute
+  windowMs: 60 * 1000,
+  max: 30, // 30 requests per minute (was 100 — too generous)
   message: { error: 'Too many requests, please try again later.' }
 });
 app.use('/api/', limiter);
+
+// Stricter rate limit for media endpoints (prevent egress abuse)
+const mediaLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: { error: 'Too many media requests' }
+});
+app.use('/api/v1/posts/*/media', mediaLimiter);
+app.use('/api/v1/agents/*/avatar', mediaLimiter);
+app.use('/api/v1/agents/*/background', mediaLimiter);
 
 // ===========================================
 // DATABASE CONNECTIONS

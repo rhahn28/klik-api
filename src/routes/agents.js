@@ -49,6 +49,17 @@ const verifyAgentApiKey = async (req, res, next) => {
 };
 
 // ============================================
+// ADMIN AUTH MIDDLEWARE
+// ============================================
+const adminAuth = (req, res, next) => {
+  const token = req.headers['x-admin-token'] || req.query.admin_token;
+  if (!token || token !== process.env.KLIK_ADMIN_TOKEN) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+};
+
+// ============================================
 // HELPER: Build Identity System Prompt
 // ============================================
 
@@ -723,7 +734,7 @@ router.get('/posts/:id', async (req, res) => {
       id: p._id.toString(),
       content: p.content,
       content_type: p.contentType,
-      media_url: p.mediaUrl,
+      media_url: p.mediaUrl ? `/api/v1/posts/${p._id}/media` : null,
       upvotes: p.upvotes,
       downvotes: p.downvotes,
       score: p.score,
@@ -869,7 +880,7 @@ router.get('/search', async (req, res) => {
  * Retrieve agent memory for context building (used by agent runtime)
  * Returns identity + episodic + relationships for prompt assembly
  */
-router.get('/:id/memory', async (req, res) => {
+router.get('/:id/memory', adminAuth, async (req, res) => {
   try {
     if (!ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ error: 'Invalid agent ID' });
@@ -970,7 +981,7 @@ router.get('/:id/memory', async (req, res) => {
  *
  * Update identity layer (called when user edits agent settings)
  */
-router.put('/:id/memory/identity', async (req, res) => {
+router.put('/:id/memory/identity', adminAuth, async (req, res) => {
   try {
     if (!ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ error: 'Invalid agent ID' });
@@ -1008,7 +1019,7 @@ router.put('/:id/memory/identity', async (req, res) => {
  *
  * Add episodic memory entry (called by agent runtime after each cycle)
  */
-router.post('/:id/memory/episodic', async (req, res) => {
+router.post('/:id/memory/episodic', adminAuth, async (req, res) => {
   try {
     if (!ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ error: 'Invalid agent ID' });
@@ -1077,7 +1088,7 @@ router.post('/:id/memory/episodic', async (req, res) => {
  *
  * Update relationship with another agent
  */
-router.post('/:id/memory/relationship', async (req, res) => {
+router.post('/:id/memory/relationship', adminAuth, async (req, res) => {
   try {
     if (!ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ error: 'Invalid agent ID' });
@@ -1336,14 +1347,18 @@ router.get('/:name', async (req, res) => {
     const avatarUrl = memory?.soul?.avatar?.imageUrl || agent.avatar || null;
     const backgroundUrl = memory?.soul?.backgroundImage?.imageUrl || null;
 
+    // Strip base64 — serve via binary endpoints only
+    const safeAvatar = avatarUrl && avatarUrl.startsWith('data:') ? `/api/v1/agents/${encodeURIComponent(agent.name)}/avatar` : avatarUrl;
+    const safeBg = backgroundUrl && backgroundUrl.startsWith('data:') ? `/api/v1/agents/${encodeURIComponent(agent.name)}/background` : backgroundUrl;
+
     res.json({
       id: agent._id.toString(),
       name: agent.name,
       display_name: agent.displayName,
       bio: agent.bio,
-      avatar: avatarUrl,
-      avatar_url: avatarUrl,
-      background_url: backgroundUrl,
+      avatar: safeAvatar,
+      avatar_url: safeAvatar,
+      background_url: safeBg,
       verified: agent.verified || false,
       follower_count: agent.followerCount || 0,
       following_count: agent.followingCount || 0,
@@ -1423,9 +1438,9 @@ router.get('/:name/avatar', async (req, res) => {
 });
 
 // ============================================
-// ADMIN: One-time migration (public, no auth required)
+// ADMIN: One-time migration (admin token required)
 // ============================================
-router.post('/admin/migrate-image-gen', async (req, res) => {
+router.post('/admin/migrate-image-gen', adminAuth, async (req, res) => {
   try {
     const result = await req.db.collection('Agent').updateMany(
       {},
@@ -1462,7 +1477,7 @@ router.post('/admin/migrate-image-gen', async (req, res) => {
  * Top up all agents to a minimum KLIK balance (admin, no auth)
  * Body: { min_balance?: number } — defaults to 500
  */
-router.post('/admin/topup-balances', async (req, res) => {
+router.post('/admin/topup-balances', adminAuth, async (req, res) => {
   try {
     const minBalance = req.body.min_balance || 500;
 
@@ -1499,7 +1514,7 @@ router.post('/admin/topup-balances', async (req, res) => {
  * Also creates AgentPersonality docs for any agents missing them.
  * This kickstarts the platform with massive activity.
  */
-router.post('/admin/activate-all-agents', async (req, res) => {
+router.post('/admin/activate-all-agents', adminAuth, async (req, res) => {
   try {
     // Activate all non-deleted agents
     const result = await req.db.collection('Agent').updateMany(
@@ -1555,7 +1570,7 @@ router.post('/admin/activate-all-agents', async (req, res) => {
  * Populate agent interests based on their names/personalities.
  * Agents with empty interests get personality-matched interests.
  */
-router.post('/admin/populate-interests', async (req, res) => {
+router.post('/admin/populate-interests', adminAuth, async (req, res) => {
   try {
     const AGENT_INTERESTS = {
       'pixelmuse': ['digital art', 'glitch art', 'illustration', 'creative process', 'design'],
@@ -1611,7 +1626,7 @@ router.post('/admin/populate-interests', async (req, res) => {
  *
  * Set unique visual styles for each agent based on their personality.
  */
-router.post('/admin/populate-visual-styles', async (req, res) => {
+router.post('/admin/populate-visual-styles', adminAuth, async (req, res) => {
   try {
     const AGENT_VISUAL_STYLES = {
       'ai_doomer': 'gritty-photojournalist',
@@ -1669,7 +1684,7 @@ router.post('/admin/populate-visual-styles', async (req, res) => {
  * Create AgentMemory documents for all agents missing them.
  * This is required for the agent runtime to function.
  */
-router.post('/admin/bootstrap-agent-memory', async (req, res) => {
+router.post('/admin/bootstrap-agent-memory', adminAuth, async (req, res) => {
   try {
     const activeAgents = await req.db.collection('Agent').find({ status: 'ACTIVE' }).toArray();
 
@@ -1879,7 +1894,7 @@ router.get('/posts/:id/comments', async (req, res) => {
  * This is an admin endpoint - should be called once to bootstrap avatars.
  * PUBLIC - no auth required
  */
-router.post('/admin/generate-all-avatars', async (req, res) => {
+router.post('/admin/generate-all-avatars', adminAuth, async (req, res) => {
   try {
     // Find all active agents
     const agents = await req.db.collection('Agent').find({
@@ -1940,7 +1955,7 @@ router.post('/admin/generate-all-avatars', async (req, res) => {
  * This forces new avatar generation with updated prompts.
  * PUBLIC - no auth required (admin only in practice)
  */
-router.post('/admin/regenerate-all-avatars', async (req, res) => {
+router.post('/admin/regenerate-all-avatars', adminAuth, async (req, res) => {
   try {
     const agents = await req.db.collection('Agent').find({
       status: 'ACTIVE'
@@ -2000,7 +2015,7 @@ router.post('/admin/regenerate-all-avatars', async (req, res) => {
  * Queue background image generation for all agents without backgrounds.
  * PUBLIC - no auth required
  */
-router.post('/admin/generate-all-backgrounds', async (req, res) => {
+router.post('/admin/generate-all-backgrounds', adminAuth, async (req, res) => {
   try {
     const agents = await req.db.collection('Agent').find({
       status: 'ACTIVE'
@@ -2056,7 +2071,7 @@ router.post('/admin/generate-all-backgrounds', async (req, res) => {
  * Recalculate postCount for all agents based on actual posts.
  * PUBLIC - no auth required
  */
-router.post('/admin/fix-post-counts', async (req, res) => {
+router.post('/admin/fix-post-counts', adminAuth, async (req, res) => {
   try {
     const agents = await req.db.collection('Agent').find({}).toArray();
     let fixed = 0;
@@ -2092,7 +2107,7 @@ router.post('/admin/fix-post-counts', async (req, res) => {
  * POST /api/v1/admin/quick-cleanup
  * Fast targeted cleanup — no expensive post count reconciliation
  */
-router.post('/admin/quick-cleanup', async (req, res) => {
+router.post('/admin/quick-cleanup', adminAuth, async (req, res) => {
   try {
     const results = {};
 
@@ -2148,7 +2163,7 @@ router.post('/admin/quick-cleanup', async (req, res) => {
  *
  * Debug endpoint to check agent runtime state without needing Railway logs.
  */
-router.post('/admin/cleanup', async (req, res) => {
+router.post('/admin/cleanup', adminAuth, async (req, res) => {
   try {
     const results = {};
 
