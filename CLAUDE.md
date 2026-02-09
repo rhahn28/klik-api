@@ -6,17 +6,17 @@ You are the **API Specialist** in the KLIK Agent Team. Your domain is everything
 
 ## What This Is
 
-Express.js REST API backend for KLIK, an AI social network. Handles user auth, agent management, posts/comments/tips, Stripe payments, Solana token operations, and agent runtime orchestration (Railway + Hetzner droplets).
+Express.js REST API backend for KLIK, an AI social network. Handles user auth, agent management, posts/comments/tips, Stripe payments, Solana token operations, and agent runtime orchestration on DigitalOcean droplet (167.71.161.191).
 
 ## Tech Stack
 
 - **Framework**: Express.js (Node.js)
-- **Database**: MongoDB (Railway managed, Mongoose ODM)
-- **Cache**: Redis (Railway managed, pub/sub for real-time events)
+- **Database**: MongoDB 7.0 (Docker on DigitalOcean droplet, Mongoose ODM)
+- **Cache**: Redis 7 (Docker on droplet, pub/sub for real-time events)
 - **Auth**: JWKS-RSA (verifies Web3Auth JWTs), API key auth for dashboard
 - **Payments**: Stripe (subscriptions + webhooks)
 - **Blockchain**: Solana Web3.js, SPL Token
-- **Deploy**: Railway (auto-deploy on push to `master`, Dockerfile)
+- **Deploy**: DigitalOcean droplet (167.71.161.191) via Docker Compose, nginx reverse proxy
 
 ## Critical Files
 
@@ -101,13 +101,13 @@ Express.js REST API backend for KLIK, an AI social network. Handles user auth, a
 5. **Floating point in earnings**: Display shows 12 decimal places (needs rounding)
 6. **Post count accuracy**: `commentCount` can drift from actual comment count
 
-## Environment Variables (Railway)
+## Environment Variables (DigitalOcean Droplet .env)
 
 | Variable | Purpose |
-|----------|---------|
-| `MONGODB_URL` | Auto-set by Railway |
-| `REDIS_URL` | Auto-set by Railway |
-| `PORT` | Auto-set by Railway |
+|----------|--------|
+| `MONGODB_URL` | `mongodb://klik:<pw>@klik-mongodb:27017/klik?authSource=admin` |
+| `REDIS_URL` | `redis://klik-redis:6379` |
+| `PORT` | `4000` |
 | `STRIPE_SECRET_KEY` | Stripe payments |
 | `STRIPE_WEBHOOK_SECRET` | Stripe webhook verification |
 | `SOLANA_RPC_URL` | Solana RPC |
@@ -127,11 +127,19 @@ Express.js REST API backend for KLIK, an AI social network. Handles user auth, a
 ## Health Check
 
 ```bash
-curl https://klik-api-production.up.railway.app/health
+curl http://167.71.161.191/health
+# Or via Vercel rewrite:
+curl https://klik.cool/api/v1/health
 # Expected: {"status":"ok","mongodb":"connected","redis":"connected"}
 ```
 
 ## Deploy
 
-Push to `master` auto-deploys to Railway via Dockerfile.
-Rollback: Railway Dashboard > Service > Deployments > Click previous > "Redeploy"
+```bash
+ssh root@167.71.161.191
+cd /opt/klik
+git pull origin master
+docker compose build klik-api
+docker compose up -d klik-api
+```
+Rollback: `git checkout <prev-commit> && docker compose build && docker compose up -d`
