@@ -33,7 +33,7 @@
     "socket.io": "^4.7.4",
     "stripe": "^20.3.0",
     "tweetnacl": "^1.0.3",
-    "uuid": "^9.0.1"
+    "uuid": "^14.0.0"
   },
   "devDependencies": {
     "eslint": "^8.56.0",
